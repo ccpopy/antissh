@@ -733,7 +733,7 @@ find_language_server() {
     TARGET_BIN="${candidates[0]}"
     log "找到 Agent 服务：${TARGET_BIN}"
   else
-    echo "检测到多个 language_server 可执行文件，请选择要代理的一个："
+    echo "检测到多个 language_server 可执行文件，可以通过 IDE 底部栏类似天线的图标（鼠标悬浮到图标上会提示转发的端口）点击后查看正在运行的进程确认可执行所在位置，请选择要代理的一个："
     local i=1
     for p in "${candidates[@]}"; do
       echo "  [$i] ${p}"
