@@ -690,6 +690,10 @@ find_language_server() {
     if [ -d "${base}" ]; then
       log "搜索目录：${base}"
       while IFS= read -r path; do
+        # 跳过 .bak 备份文件（之前脚本运行时创建的备份）
+        if [[ "${path}" == *.bak ]]; then
+          continue
+        fi
         # 去重：检查是否已经添加过
         if [ -z "${seen_paths[${path}]:-}" ]; then
           seen_paths["${path}"]=1
@@ -751,10 +755,55 @@ find_language_server() {
 
 setup_wrapper() {
   BACKUP_BIN="${TARGET_BIN}.bak"
+  
+  # Wrapper 脚本的签名标识
+  local WRAPPER_SIGNATURE="# 该文件由 antigravity-set.sh 自动生成"
 
   if [ -f "${BACKUP_BIN}" ]; then
-    log "检测到已有备份文件：${BACKUP_BIN}，本地运行脚本将仅更新代理配置"
+    # .bak 文件存在，说明之前执行过脚本
+    # 需要验证当前的 TARGET_BIN 是否为 wrapper 脚本
+    if grep -q "${WRAPPER_SIGNATURE}" "${TARGET_BIN}" 2>/dev/null; then
+      # 当前文件是 wrapper 脚本，直接更新即可
+      log "检测到已有备份文件：${BACKUP_BIN}"
+      log "当前文件已是 wrapper 脚本，将更新代理配置"
+    else
+      # 当前文件不是 wrapper 脚本，但 .bak 已存在
+      # 这是异常情况，可能是手动恢复过或其他问题
+      warn "检测到异常情况：${BACKUP_BIN} 存在，但 ${TARGET_BIN} 不是 wrapper 脚本"
+      echo ""
+      echo "可能的原因："
+      echo "  1. 之前手动恢复过原始文件"
+      echo "  2. Antigravity 更新后覆盖了 wrapper"
+      echo ""
+      echo "当前文件信息："
+      file "${TARGET_BIN}" 2>/dev/null || echo "  无法识别文件类型"
+      echo ""
+      echo "备份文件信息："
+      file "${BACKUP_BIN}" 2>/dev/null || echo "  无法识别文件类型"
+      echo ""
+      read -r -p "是否将当前文件作为新的原始文件备份？ [y/N]: " confirm
+      case "${confirm}" in
+        [Yy]*)
+          log "将当前文件备份为新的 .bak 文件"
+          mv "${BACKUP_BIN}" "${BACKUP_BIN}.old" || true
+          mv "${TARGET_BIN}" "${BACKUP_BIN}" || error "备份失败"
+          ;;
+        *)
+          echo "操作取消。如需继续，请先手动处理这两个文件："
+          echo "  ${TARGET_BIN}"
+          echo "  ${BACKUP_BIN}"
+          exit 1
+          ;;
+      esac
+    fi
   else
+    # .bak 文件不存在
+    # 检查当前文件是否为 wrapper（防止意外情况）
+    if grep -q "${WRAPPER_SIGNATURE}" "${TARGET_BIN}" 2>/dev/null; then
+      error "异常：${TARGET_BIN} 是 wrapper 脚本，但备份文件 ${BACKUP_BIN} 不存在！请手动检查。"
+    fi
+    
+    # 正常情况：首次运行，备份原始文件
     log "备份原始 Agent 服务到：${BACKUP_BIN}"
     mv "${TARGET_BIN}" "${BACKUP_BIN}" || error "备份失败：无法移动 ${TARGET_BIN} -> ${BACKUP_BIN}"
   fi
