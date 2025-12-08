@@ -50,6 +50,18 @@ mv /path/to/language_server_xxx.bak /path/to/language_server_xxx
 
 路径会在脚本执行完成后显示。
 
+### 注意
+
+IDE 升级后可能会在 `~/.antigravity-server/bin/` 下新增版本目录，导致之前配置的代理失效。
+
+**解决方法（二选一）：**
+
+1. **推荐**：直接重新运行脚本，脚本会自动检测新目录并重新配置
+2. **手动迁移**：
+   - 进入新目录 `~/.antigravity-server/bin/<新版本号>/extensions/antigravity/bin/`
+   - 将 `language_server_linux_*` 重命名为 `language_server_linux_*.bak`
+   - 将原目录中的 wrapper 脚本（即之前配置的 `language_server_linux_*`）复制到新目录
+
 ---
 
 ## macOS / Windows 替代方案
