@@ -1088,16 +1088,10 @@ test_proxy() {
   
   # 使用 graftcp 测试访问 google.com
   log "测试通过代理访问 google.com..."
-  local test_result
-  if "${GRAFTCP_DIR}/graftcp" curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null; then
-    test_result=$?
-  else
-    test_result=$?
-  fi
   
   # 获取 HTTP 状态码
   local http_code
-  http_code=$("${GRAFTCP_DIR}/graftcp" curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
+  http_code=$("${GRAFTCP_DIR}/graftcp" curl -s --connect-timeout 5 --max-time 10 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
   
   # 停止测试用的 graftcp-local
   kill "${graftcp_local_pid}" 2>/dev/null || true
@@ -1111,17 +1105,37 @@ test_proxy() {
     return 0
   else
     echo ""
-    echo "❌ 代理测试失败！"
+    echo "⚠️ 代理测试失败"
     echo "   无法通过代理访问 google.com (HTTP ${http_code})"
     echo ""
     echo "可能原因："
     echo "  1. 代理服务器未启动或不可用"
     echo "  2. 代理地址配置错误：${PROXY_TYPE}://${PROXY_URL}"
     echo "  3. 代理服务器无法访问外网"
-    echo "  4. 网络连接问题"
+    echo "  4. 测试时网络波动或超时"
+    echo "  5. 代理服务器限制访问 google.com"
     echo ""
-    echo "如需调整代理配置，请重新执行脚本。"
-    exit 1
+    echo "============================================="
+    echo " 是否仍然继续完成配置？"
+    echo "   - 如果你确定代理是可用的，只是测试有问题，可以选择继续"
+    echo "   - 如果代理确实不可用，或者代理配置错误，建议选择退出并检查代理设置"
+    echo "============================================="
+    read -r -p "继续配置？ [y/N]（默认 N，退出）: " continue_choice
+    
+    case "${continue_choice}" in
+      [Yy]*)
+        echo ""
+        echo "⚠️ 用户选择忽略测试结果，继续配置..."
+        echo "   如果实际使用中代理不生效，请重新检查代理设置。"
+        echo ""
+        return 0
+        ;;
+      *)
+        echo ""
+        echo "配置已取消。如需调整代理配置，请重新执行脚本。"
+        exit 1
+        ;;
+    esac
   fi
 }
 
