@@ -104,6 +104,38 @@ IDE 升级后可能会在 `~/.antigravity-server/bin/` 下新增版本目录，�
    - 将 `language_server_linux_*` 重命名为 `language_server_linux_*.bak`
    - 将原目录中的 wrapper 脚本（即之前配置的 `language_server_linux_*`）复制到新目录
 
+### WSL 网络配置（Mirrored 模式）
+
+如果你在 WSL 中使用本脚本，建议开启 **Mirrored 网络模式**，这样 WSL 可以直接使用宿主机的代理（127.0.0.1）。
+
+**配置方法：**
+
+1. 在 Windows 用户目录下创建或编辑 `.wslconfig` 文件：
+
+```ini
+# %USERPROFILE%\.wslconfig
+[wsl2]
+networkingMode=mirrored
+```
+
+2. 重启 WSL：
+
+```powershell
+wsl --shutdown
+```
+
+3. 重新进入 WSL 后，代理地址可直接使用 `127.0.0.1`：
+
+```bash
+# 例如
+socks5://127.0.0.1:10808
+http://127.0.0.1:10809
+```
+
+> **注意**：Mirrored 模式需要 Windows 11 22H2 及以上版本，且 WSL 版本 >= 2.0.0。
+>
+> 如果不使用 Mirrored 模式，需要使用 WSL 虚拟网卡的网关 IP（通常是 `cat /etc/resolv.conf` 中的 nameserver 地址）。
+
 ---
 
 ## macOS / Windows 替代方案
