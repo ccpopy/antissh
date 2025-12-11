@@ -11,8 +11,6 @@
 # 安装位置：
 #   graftcp 安装在：$HOME/.graftcp-antigravity/graftcp
 #   安装日志：      $HOME/.graftcp-antigravity/install.log
-#
-# 再次执行脚本 = 修改代理 / 重新生成 wrapper（不会覆盖 .bak）
 
 ################################ 基本变量 ################################
 
@@ -28,7 +26,7 @@ PM=""          # 包管理器
 SUDO=""        # sudo 命令
 PROXY_URL=""   # 代理地址（不含协议前缀，如 127.0.0.1:10808）
 PROXY_TYPE=""  # socks5 或 http
-GRAFTCP_DIR="" # 最终的 graftcp 目录 = ${REPO_DIR}
+GRAFTCP_DIR="${GRAFTCP_DIR:-}" # 保留用户通过环境变量传入的值，空则后续设为 ${REPO_DIR}
 TARGET_BIN=""  # language_server_* 路径
 BACKUP_BIN=""  # 备份路径 = ${TARGET_BIN}.bak
 
@@ -153,6 +151,40 @@ validate_ip() {
   return 0
 }
 
+# 校验主机名格式
+# 返回 0 表示有效，1 表示无效
+validate_hostname() {
+  local hostname="$1"
+  
+  # 空字符串无效
+  if [ -z "${hostname}" ]; then
+    return 1
+  fi
+  
+  # 主机名长度限制（RFC 1035: 最多 255 字符）
+  if [ "${#hostname}" -gt 255 ]; then
+    return 1
+  fi
+  
+  # 主机名格式校验：
+  # - 允许字母、数字、连字符和点
+  # - 不能以连字符或点开头/结尾
+  # - 每个标签（点分隔的部分）最多 63 字符
+  if ! echo "${hostname}" | grep -Eq '^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$'; then
+    # 单字符主机名也有效
+    if ! echo "${hostname}" | grep -Eq '^[a-zA-Z0-9]$'; then
+      return 1
+    fi
+  fi
+  
+  # 检查是否包含连续的点
+  if echo "${hostname}" | grep -q '\.\.'; then
+    return 1
+  fi
+  
+  return 0
+}
+
 # 校验端口号（1-65535）
 # 返回 0 表示有效，1 表示无效
 validate_port() {
@@ -204,7 +236,17 @@ parse_proxy_url() {
       echo "⚠️  检测到 socks5h:// 协议，将自动转换为 socks5://"
       PROXY_TYPE="socks5"
       ;;
-    http|https)
+    http)
+      PROXY_TYPE="http"
+      ;;
+    https)
+      # 警告：graftcp-local 仅支持明文 HTTP 代理（CONNECT 方法），不支持 TLS 加密的代理隧道
+      echo ""
+      echo "⚠️  检测到 https:// 代理协议"
+      echo "   graftcp-local 当前仅支持明文 HTTP 代理（使用 CONNECT 方法）"
+      echo "   不支持以 TLS 加密方式连接代理服务器（https:// 代理）"
+      echo "   将自动转换为 http:// 处理，如果连接失败，请确认代理服务器支持明文 HTTP 连接"
+      echo ""
       PROXY_TYPE="http"
       ;;
     *)
@@ -226,12 +268,14 @@ parse_proxy_url() {
   # 移除端口后可能的路径（如 /）
   port="${port%%/*}"
   
-  # 校验 IP 地址
+  # 校验 IP 地址或主机名
   if ! validate_ip "${host}"; then
-    # 也允许 localhost
+    # 也允许 localhost 和合法的主机名
     if [ "${host}" != "localhost" ]; then
-      PARSE_ERROR="IP 地址格式无效：${host}（每段必须在 0-255 之间）"
-      return 1
+      if ! validate_hostname "${host}"; then
+        PARSE_ERROR="地址格式无效：${host}（必须是有效的 IP 地址或主机名）"
+        return 1
+      fi
     fi
   fi
   
@@ -338,6 +382,59 @@ ask_proxy() {
   done
 }
 
+################################ 轻量级代理可用性探测 ################################
+
+# 快速探测代理是否可用
+# 返回 0 表示代理可用，1 表示不可用
+# 探测成功时临时导出 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY 供 git/curl 使用
+PROXY_ENV_EXPORTED="false"
+
+probe_and_export_proxy() {
+  local proxy_full_url=""
+  
+  # 构造完整代理 URL
+  if [ "${PROXY_TYPE}" = "socks5" ]; then
+    proxy_full_url="socks5://${PROXY_URL}"
+  else
+    proxy_full_url="http://${PROXY_URL}"
+  fi
+  
+  log "正在快速探测代理可用性...（超时 3 秒）"
+  
+  # 使用 curl 进行轻量级探测
+  # 尝试访问一个快速响应的地址
+  local probe_result=1
+  
+  if [ "${PROXY_TYPE}" = "socks5" ]; then
+    # 对于 socks5 代理，使用 --socks5 选项
+    if curl -s --socks5 "${PROXY_URL}" --connect-timeout 3 --max-time 5 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null | grep -qE '^(200|301|302)$'; then
+      probe_result=0
+    fi
+  else
+    # 对于 http 代理，使用 -x 选项
+    if curl -s -x "${proxy_full_url}" --connect-timeout 3 --max-time 5 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null | grep -qE '^(200|301|302)$'; then
+      probe_result=0
+    fi
+  fi
+  
+  if [ "${probe_result}" -eq 0 ]; then
+    log "代理探测成功，临时导出 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY 供后续 git/curl 使用"
+    export HTTP_PROXY="${proxy_full_url}"
+    export HTTPS_PROXY="${proxy_full_url}"
+    export ALL_PROXY="${proxy_full_url}"
+    # 同时设置小写版本（某些工具只认小写）
+    export http_proxy="${proxy_full_url}"
+    export https_proxy="${proxy_full_url}"
+    export all_proxy="${proxy_full_url}"
+    PROXY_ENV_EXPORTED="true"
+    return 0
+  else
+    log "代理探测失败或超时，将继续使用镜像下载策略，不设置代理环境变量"
+    PROXY_ENV_EXPORTED="false"
+    return 1
+  fi
+}
+
 ################################ 依赖检查/安装 ################################
 
 detect_pkg_manager() {
@@ -414,37 +511,39 @@ check_go_version() {
 
 # 升级 Go 到最新稳定版
 upgrade_go_version() {
-  # 权限预检查
-  if [ -d "/usr/local/go" ]; then
-    # 检查是否有写入权限
-    if [ "$(id -u)" -ne 0 ]; then
-      if ! command -v sudo >/dev/null 2>&1; then
+  # 设置 SUDO 变量，用于后续需要权限的操作
+  local UPGRADE_SUDO=""
+  
+  # 权限预检查：安装到 /usr/local 始终需要 root/sudo 权限
+  if [ "$(id -u)" -ne 0 ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      echo ""
+      echo "❌ 升级 Go 需要 root 权限，但系统未安装 sudo"
+      echo ""
+      echo "解决方法："
+      echo "  1. 使用 root 用户运行此脚本"
+      echo "  2. 或安装 sudo 后重试"
+      echo "  3. 或手动升级 Go：https://go.dev/doc/install"
+      echo ""
+      echo "将使用兼容模式继续（不升级 Go）..."
+      NEED_GO_COMPAT="true"
+      return
+    fi
+    # 测试 sudo 是否可用
+    if ! sudo -n true 2>/dev/null; then
+      echo ""
+      echo "⚠️ 升级 Go 需要 sudo 权限"
+      echo "   请在接下来的提示中输入密码，或按 Ctrl+C 取消"
+      echo ""
+      if ! sudo true; then
         echo ""
-        echo "❌ 升级 Go 需要 root 权限，但系统未安装 sudo"
-        echo ""
-        echo "解决方法："
-        echo "  1. 使用 root 用户运行此脚本"
-        echo "  2. 或安装 sudo 后重试"
-        echo "  3. 或手动升级 Go：https://go.dev/doc/install"
-        echo ""
-        echo "将使用兼容模式继续（不升级 Go）..."
+        echo "❌ 无法获取 sudo 权限，将使用兼容模式继续..."
         NEED_GO_COMPAT="true"
         return
       fi
-      # 测试 sudo 是否可用
-      if ! sudo -n true 2>/dev/null; then
-        echo ""
-        echo "⚠️ 升级 Go 需要 sudo 权限"
-        echo "   请在接下来的提示中输入密码，或按 Ctrl+C 取消"
-        echo ""
-        if ! sudo true; then
-          echo ""
-          echo "❌ 无法获取 sudo 权限，将使用兼容模式继续..."
-          NEED_GO_COMPAT="true"
-          return
-        fi
-      fi
     fi
+    # sudo 验证通过，设置 UPGRADE_SUDO
+    UPGRADE_SUDO="sudo"
   fi
   
   log "开始升级 Go..."
@@ -480,7 +579,7 @@ upgrade_go_version() {
   local download_urls=(
     "https://mirrors.aliyun.com/golang/${go_tar}" # 阿里云镜像
     "https://golang.google.cn/dl/${go_tar}"       # Google 中国镜像
-    "https://go.dev/dl/${go_tar}"                 # 官方源（备用）
+    "https://go.dev/dl/${go_tar}"                 # 官方源
   )
   
   local download_success="false"
@@ -510,13 +609,13 @@ upgrade_go_version() {
   # 备份旧版本
   if [ -d "/usr/local/go" ]; then
     log "备份旧版 Go 到 /usr/local/go.bak..."
-    ${SUDO} rm -rf /usr/local/go.bak 2>/dev/null || true
-    ${SUDO} mv /usr/local/go /usr/local/go.bak
+    ${UPGRADE_SUDO} rm -rf /usr/local/go.bak 2>/dev/null || true
+    ${UPGRADE_SUDO} mv /usr/local/go /usr/local/go.bak
   fi
   
   # 解压新版本
   log "安装 Go 到 /usr/local/go..."
-  ${SUDO} tar -C /usr/local -xzf "${tmp_dir}/${go_tar}"
+  ${UPGRADE_SUDO} tar -C /usr/local -xzf "${tmp_dir}/${go_tar}"
   
   # 更新 PATH
   if ! echo "${PATH}" | grep -q "/usr/local/go/bin"; then
@@ -544,14 +643,20 @@ ensure_dependencies() {
   detect_pkg_manager
 
   missing=()
+  # 核心编译依赖
   for cmd in git make gcc go; do
     if ! command -v "${cmd}" >/dev/null 2>&1; then
       missing+=("${cmd}")
     fi
   done
+  
+  # 网络工具依赖
+  if ! command -v curl >/dev/null 2>&1; then
+    missing+=("curl")
+  fi
 
   if [ "${#missing[@]}" -eq 0 ]; then
-    log "依赖已满足：git / make / gcc / go"
+    log "依赖已满足：git / make / gcc / go / curl"
     check_go_version
     return
   fi
@@ -575,25 +680,64 @@ ensure_dependencies() {
   case "${PM}" in
     apt)
       ${SUDO} apt-get update | tee -a "${INSTALL_LOG}"
-      ${SUDO} apt-get install -y git make gcc golang-go | tee -a "${INSTALL_LOG}"
+      # 安装核心编译依赖 + curl + procps（pgrep/pkill）+ 可选的 net-tools（netstat）
+      ${SUDO} apt-get install -y git make gcc golang-go curl procps net-tools 2>&1 | tee -a "${INSTALL_LOG}"
+      local install_result="${PIPESTATUS[0]}"
+      if [ "${install_result}" -ne 0 ]; then
+        # 回退到不包含 net-tools 的版本
+        ${SUDO} apt-get install -y git make gcc golang-go curl procps 2>&1 | tee -a "${INSTALL_LOG}"
+        install_result="${PIPESTATUS[0]}"
+      fi
       ;;
     dnf)
-      ${SUDO} dnf install -y git make gcc golang | tee -a "${INSTALL_LOG}"
+      ${SUDO} dnf install -y git make gcc golang curl procps-ng net-tools 2>&1 | tee -a "${INSTALL_LOG}"
+      local install_result="${PIPESTATUS[0]}"
+      if [ "${install_result}" -ne 0 ]; then
+        ${SUDO} dnf install -y git make gcc golang curl procps-ng 2>&1 | tee -a "${INSTALL_LOG}"
+        install_result="${PIPESTATUS[0]}"
+      fi
       ;;
     yum)
-      ${SUDO} yum install -y git make gcc golang | tee -a "${INSTALL_LOG}"
+      ${SUDO} yum install -y git make gcc golang curl procps-ng net-tools 2>&1 | tee -a "${INSTALL_LOG}"
+      local install_result="${PIPESTATUS[0]}"
+      if [ "${install_result}" -ne 0 ]; then
+        ${SUDO} yum install -y git make gcc golang curl procps-ng 2>&1 | tee -a "${INSTALL_LOG}"
+        install_result="${PIPESTATUS[0]}"
+      fi
       ;;
     pacman)
-      ${SUDO} pacman -Sy --noconfirm git base-devel go | tee -a "${INSTALL_LOG}"
+      ${SUDO} pacman -Sy --noconfirm git base-devel go curl procps-ng net-tools 2>&1 | tee -a "${INSTALL_LOG}"
+      local install_result="${PIPESTATUS[0]}"
+      if [ "${install_result}" -ne 0 ]; then
+        ${SUDO} pacman -Sy --noconfirm git base-devel go curl procps-ng 2>&1 | tee -a "${INSTALL_LOG}"
+        install_result="${PIPESTATUS[0]}"
+      fi
       ;;
     zypper)
       ${SUDO} zypper refresh | tee -a "${INSTALL_LOG}"
-      ${SUDO} zypper install -y git make gcc go | tee -a "${INSTALL_LOG}"
+      ${SUDO} zypper install -y git make gcc go curl procps net-tools 2>&1 | tee -a "${INSTALL_LOG}"
+      local install_result="${PIPESTATUS[0]}"
+      if [ "${install_result}" -ne 0 ]; then
+        ${SUDO} zypper install -y git make gcc go curl procps 2>&1 | tee -a "${INSTALL_LOG}"
+        install_result="${PIPESTATUS[0]}"
+      fi
       ;;
     *)
       error "暂不支持使用 ${PM} 自动安装依赖，请手动安装：${missing[*]}"
       ;;
   esac
+  
+  # 验证安装是否成功
+  if [ "${install_result:-1}" -ne 0 ]; then
+    echo ""
+    echo "❌ 依赖安装失败"
+    echo ""
+    echo "请检查以上输出中的错误信息，或手动安装以下依赖后重试："
+    echo "  ${missing[*]}"
+    echo ""
+    echo "详细日志：${INSTALL_LOG}"
+    error "依赖安装失败"
+  fi
 
   check_go_version
   log "依赖安装完成。"
@@ -602,6 +746,25 @@ ensure_dependencies() {
 ################################ 安装 / 编译 graftcp ################################
 
 install_graftcp() {
+  # 检查用户是否通过环境变量指定了 graftcp 目录
+  if [ -n "${GRAFTCP_DIR:-}" ]; then
+    log "检测到环境变量 GRAFTCP_DIR=${GRAFTCP_DIR}"
+    if [ -x "${GRAFTCP_DIR}/graftcp" ] && [ -x "${GRAFTCP_DIR}/local/graftcp-local" ]; then
+      log "验证通过，将使用用户指定的 graftcp 目录，跳过编译"
+      return
+    else
+      echo ""
+      echo "❌ 环境变量 GRAFTCP_DIR 指定的目录无效"
+      echo "   GRAFTCP_DIR=${GRAFTCP_DIR}"
+      echo ""
+      echo "   请确保以下文件存在且可执行："
+      echo "     - ${GRAFTCP_DIR}/graftcp"
+      echo "     - ${GRAFTCP_DIR}/local/graftcp-local"
+      echo ""
+      error "GRAFTCP_DIR 验证失败，请检查路径是否正确。"
+    fi
+  fi
+
   GRAFTCP_DIR="${REPO_DIR}"
 
   if [ -x "${GRAFTCP_DIR}/graftcp" ] && [ -x "${GRAFTCP_DIR}/local/graftcp-local" ]; then
@@ -641,25 +804,28 @@ install_graftcp() {
       
       # 尝试使用国内镜像加速
       local clone_urls=(
-        "https://github.com/hmgle/graftcp.git"          # 官方源
         "https://ghproxy.net/https://github.com/hmgle/graftcp.git"  # 代理镜像
+        "https://github.com/hmgle/graftcp.git"          # 官方源
       )
       
       for url in "${clone_urls[@]}"; do
         log "尝试从 ${url} 克隆..."
-        if git clone --depth 1 "${url}" "${GRAFTCP_DIR}" 2>&1 | tee -a "${INSTALL_LOG}"; then
+        # 使用 PIPESTATUS 获取 git clone 的实际返回码，而不是 tee 的返回码
+        git clone --depth 1 "${url}" "${GRAFTCP_DIR}" 2>&1 | tee -a "${INSTALL_LOG}"
+        local git_exit_code="${PIPESTATUS[0]}"
+        if [ "${git_exit_code}" -eq 0 ]; then
           # 验证克隆是否完整
           if [ -d "${GRAFTCP_DIR}/.git" ] && [ -f "${GRAFTCP_DIR}/Makefile" ]; then
             clone_success="true"
             log "仓库克隆成功"
-            break 2  # 跳出两层循环
+            break 2
           else
             warn "克隆不完整，清理后重试..."
             rm -rf "${GRAFTCP_DIR}"
             mkdir -p "${GRAFTCP_DIR}"
           fi
         else
-          warn "从 ${url} 克隆失败"
+          warn "从 ${url} 克隆失败 (退出码: ${git_exit_code})"
         fi
       done
     done
@@ -669,7 +835,8 @@ install_graftcp() {
     fi
   else
     log "检测到已有 graftcp 仓库，尝试更新..."
-    (cd "${GRAFTCP_DIR}" && git pull --ff-only 2>&1 | tee -a "${INSTALL_LOG}") || warn "graftcp 仓库更新失败，继续使用当前版本。"
+    # 使用 PIPESTATUS 获取 git pull 的实际返回码
+    (cd "${GRAFTCP_DIR}" && git pull --ff-only 2>&1 | tee -a "${INSTALL_LOG}"; exit "${PIPESTATUS[0]}") || warn "graftcp 仓库更新失败，继续使用当前版本。"
   fi
 
   cd "${GRAFTCP_DIR}" || error "无法进入目录：${GRAFTCP_DIR}"
@@ -683,8 +850,10 @@ install_graftcp() {
   fi
 
   # 兼容旧版本 Go：删除 go.mod 中的 toolchain 指令
+  # 注意：这里修改的是克隆到 ${GRAFTCP_DIR} 的 graftcp 仓库，不是用户的项目
   if [ "${NEED_GO_COMPAT}" = "true" ]; then
-    log "兼容模式：移除 go.mod 中的 toolchain 指令..."
+    log "兼容模式：移除 ${GRAFTCP_DIR} 中 go.mod 的 toolchain 指令..."
+    log "  注：此修改仅影响 graftcp 仓库，不影响您的其他项目"
     for gomod in go.mod local/go.mod; do
       if [ -f "${gomod}" ] && grep -q '^toolchain' "${gomod}"; then
         log "  移除 ${gomod} 中的 toolchain 行"
@@ -761,10 +930,31 @@ install_graftcp() {
     echo "  2. Go 版本过低或不兼容"
     echo "  3. 缺少编译工具（gcc/make）"
     echo ""
-    echo "解决建议："
-    echo "  1. 检查网络连接，确保能访问 github.com 或 goproxy.cn"
-    echo "  2. 手动升级 Go 到 1.21+：https://go.dev/doc/install"
-    echo "  3. 查看详细日志：${INSTALL_LOG}"
+    echo "===================== 手动安装指引 ====================="
+    echo ""
+    echo "方法 1：在本机手动编译"
+    echo "  1. 根据上述原因排查并解决问题（如升级 Go、配置网络代理等）"
+    echo "  2. 手动执行编译："
+    echo "     cd ${REPO_DIR} && make"
+    echo "  3. 编译成功后设置环境变量并重新运行脚本："
+    echo "     export GRAFTCP_DIR=${REPO_DIR}"
+    echo "     bash $0"
+    echo ""
+    echo "方法 2：在其他机器编译后拷贝"
+    echo "  1. 在可正常编译的机器上执行："
+    echo "     git clone https://github.com/hmgle/graftcp.git 或加速地址：git clone https://ghproxy.net/https://github.com/hmgle/graftcp.git"
+    echo "     cd graftcp && make"
+    echo "  2. 将整个 graftcp 目录拷贝到本机"
+    echo "  3. 设置环境变量后重新运行脚本："
+    echo "     export GRAFTCP_DIR=/path/to/graftcp"
+    echo "     bash $0"
+    echo ""
+    echo "=========================================================="
+    echo ""
+    echo "排查建议："
+    echo "  - 检查网络，确保能访问 github.com 或 goproxy.cn"
+    echo "  - 升级 Go 到 1.21+：https://go.dev/doc/install"
+    echo "  - 查看详细日志：${INSTALL_LOG}"
     echo ""
     # 显示日志最后几行帮助诊断
     echo "日志最后 10 行："
@@ -949,7 +1139,10 @@ setup_wrapper() {
     mv "${TARGET_BIN}" "${BACKUP_BIN}" || error "备份失败：无法移动 ${TARGET_BIN} -> ${BACKUP_BIN}"
   fi
 
-  cat > "${TARGET_BIN}" <<EOF
+  # 生成 wrapper 脚本（使用原子写入：先写临时文件，再移动到目标位置）
+  local wrapper_tmp="${TARGET_BIN}.tmp.$$"
+  
+  cat > "${wrapper_tmp}" <<EOF
 #!/usr/bin/env bash
 # 该文件由 antigravity-set.sh 自动生成
 # 用 graftcp 代理启动原始 Antigravity Agent
@@ -985,16 +1178,36 @@ else
   fi
 fi
 
+# 设置 GODEBUG，保留用户原有值并追加所需配置
 # 1. 强制使用系统 DNS (解决解析问题)
-export GODEBUG="netdns=cgo"
 # 2. 关闭 HTTP/2 客户端 (解决 EOF 等问题)
-export GODEBUG="\$GODEBUG,http2client=0"
+if [ -n "\${GODEBUG:-}" ]; then
+  export GODEBUG="\$GODEBUG,netdns=cgo,http2client=0"
+else
+  export GODEBUG="netdns=cgo,http2client=0"
+fi
 
 # 使用 graftcp 启动备份的原始 Agent 服务
 exec "\$GRAFTCP_DIR/graftcp" "\$0.bak" "\$@"
 EOF
 
-  chmod +x "${TARGET_BIN}" || error "无法为 ${TARGET_BIN} 添加执行权限"
+  # 设置执行权限
+  if ! chmod +x "${wrapper_tmp}"; then
+    rm -f "${wrapper_tmp}"
+    error "无法为 wrapper 添加执行权限"
+  fi
+  
+  # 原子移动到目标位置
+  if ! mv "${wrapper_tmp}" "${TARGET_BIN}"; then
+    rm -f "${wrapper_tmp}"
+    # 尝试恢复备份
+    if [ -f "${BACKUP_BIN}" ]; then
+      warn "wrapper 写入失败，尝试恢复备份..."
+      mv "${BACKUP_BIN}" "${TARGET_BIN}" 2>/dev/null || true
+    fi
+    error "wrapper 写入失败：无法移动临时文件到 ${TARGET_BIN}"
+  fi
+  
   log "已生成代理 wrapper：${TARGET_BIN}"
 }
 
@@ -1008,6 +1221,10 @@ test_proxy() {
 
   # graftcp-local 默认监听端口
   local GRAFTCP_LOCAL_PORT="2233"
+  
+  # 初始化变量：是否需要在测试结束后关闭 graftcp-local
+  local need_kill_graftcp_local="false"
+  local graftcp_local_pid=""
 
   # 检查端口是否被占用
   local port_in_use="false"
@@ -1053,8 +1270,8 @@ test_proxy() {
       else
         "${GRAFTCP_DIR}/local/graftcp-local" -socks5="${PROXY_URL}" -select_proxy_mode=only_socks5 &
       fi
-      local graftcp_local_pid=$!
-      local need_kill_graftcp_local="true"
+      graftcp_local_pid=$!
+      need_kill_graftcp_local="true"
       sleep 1
       
       # 检查 graftcp-local 是否成功启动
@@ -1094,8 +1311,8 @@ test_proxy() {
     else
       "${GRAFTCP_DIR}/local/graftcp-local" -socks5="${PROXY_URL}" -select_proxy_mode=only_socks5 &
     fi
-    local graftcp_local_pid=$!
-    local need_kill_graftcp_local="true"
+    graftcp_local_pid=$!
+    need_kill_graftcp_local="true"
     sleep 1
 
     # 检查 graftcp-local 是否成功启动
@@ -1166,7 +1383,7 @@ test_proxy() {
     echo ""
     echo "============================================="
     echo " 是否仍然继续完成配置？"
-    echo "   - 如果你确定代理是可用的，只是测试有问题，可以选择继续"
+    echo "   - 如果确定代理是可用的，只是测试存在问题，可以选择继续"
     echo "   - 如果代理确实不可用，或者代理配置错误，建议选择退出并检查代理设置"
     echo "============================================="
     read -r -p "继续配置？ [y/N]（默认 N，退出）: " continue_choice
@@ -1198,6 +1415,11 @@ main() {
 
   check_system
   ask_proxy
+  
+  # 轻量级探测代理可用性，成功则导出代理环境变量供后续 git/curl 使用（可选增益）
+  # 探测失败不影响后续流程，继续走镜像下载策略
+  probe_and_export_proxy || true
+  
   ensure_dependencies
   install_graftcp
   find_language_server
