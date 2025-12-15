@@ -57,10 +57,16 @@ check_linux_version() {
   . /etc/os-release
 
   case "${ID}" in
-    ubuntu|debian)
+    ubuntu)
       major="${VERSION_ID%%.*}"
       if [ "${major}" -lt 16 ]; then
         error "检测到 ${ID} ${VERSION_ID}，版本过低（<16），不在脚本支持范围。"
+      fi
+      ;;
+    debian)
+      major="${VERSION_ID%%.*}"
+      if [ "${major}" -lt 11 ]; then
+        error "检测到 ${ID} ${VERSION_ID}，版本过低（<11），不在脚本支持范围。"
       fi
       ;;
     centos|rhel|rocky|almalinux)
@@ -1063,10 +1069,39 @@ find_language_server() {
     TARGET_BIN="${candidates[0]}"
     log "找到 Agent 服务：${TARGET_BIN}"
   else
-    echo "检测到多个 language_server 可执行文件，可以通过 IDE 底部栏类似天线的图标（鼠标悬浮到图标上会提示转发的端口）点击后查看正在运行的进程确认可执行所在位置，请选择要代理的一个："
+    local -a sorted_lines=()
+    local -a sorted_candidates=()
+    local -a sorted_mtimes=()
+
+    # 按文件修改时间排序（从新到旧）
+    mapfile -t sorted_lines < <(
+      for p in "${candidates[@]}"; do
+        local epoch
+        epoch="$(stat -c '%Y' -- "${p}" 2>/dev/null || echo 0)"
+        printf '%s\t%s\n' "${epoch}" "${p}"
+      done | sort -rn -k1,1 -k2,2
+    )
+
+    for line in "${sorted_lines[@]}"; do
+      local epoch p mtime
+      IFS=$'\t' read -r epoch p <<< "${line}"
+
+      if [ -n "${epoch}" ] && echo "${epoch}" | grep -Eq '^[0-9]+$'; then
+        mtime="$(date -d "@${epoch}" '+%F %T %z' 2>/dev/null || stat -c '%y' -- "${p}" 2>/dev/null || echo "unknown")"
+      else
+        mtime="$(stat -c '%y' -- "${p}" 2>/dev/null || echo "unknown")"
+      fi
+
+      sorted_candidates+=("${p}")
+      sorted_mtimes+=("${mtime}")
+    done
+
+    candidates=("${sorted_candidates[@]}")
+
+    echo "检测到多个 language_server 可执行文件，请选择要代理的一个："
     local i=1
     for p in "${candidates[@]}"; do
-      echo "  [$i] ${p}"
+      echo "  [$i] ${sorted_mtimes[$((i-1))]}  ${p}"
       i=$((i+1))
     done
     read -r -p "请输入序号（默认 1）: " idx
