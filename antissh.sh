@@ -163,11 +163,23 @@ check_port_occupied() {
     return 1
   fi
 
-  # 检查是否是 graftcp-local（通过 FIFO 路径和 pgrep）
-  if [ -e "${INSTALL_ROOT}/graftcp-local-${port}.fifo" ]; then
-    if command -v pgrep >/dev/null 2>&1; then
-      if pgrep -f "graftcp-local.*:${port}" >/dev/null 2>&1; then
-        PORT_OCCUPIED_BY_GRAFTCP="true"
+  # 检查是否是 graftcp-local
+  # 方式 1：通过 pgrep 检查是否有 graftcp-local 进程使用该端口
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -f "graftcp-local.*:${port}" >/dev/null 2>&1; then
+      PORT_OCCUPIED_BY_GRAFTCP="true"
+    fi
+  fi
+  
+  # 方式 2：如果 pgrep 未找到，检查是否存在 FIFO 文件
+  if [ "${PORT_OCCUPIED_BY_GRAFTCP}" = "false" ]; then
+    if [ -e "${INSTALL_ROOT}/graftcp-local-${port}.fifo" ]; then
+      # FIFO 文件存在，进一步用 ss/lsof 确认端口确实被 graftcp-local 使用
+      # 这种情况可能是进程名不完全匹配 pgrep 模式
+      if command -v lsof >/dev/null 2>&1; then
+        if lsof -i ":${port}" 2>/dev/null | grep -qi "graftcp"; then
+          PORT_OCCUPIED_BY_GRAFTCP="true"
+        fi
       fi
     fi
   fi
