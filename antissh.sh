@@ -163,25 +163,41 @@ check_port_occupied() {
     return 1
   fi
 
-  # 检查是否是 graftcp-local
-  # 方式 1：通过 pgrep 检查是否有 graftcp-local 进程使用该端口
+  # 检查是否是 graftcp-local 占用了该端口
+  # 策略：
+  #   1. 对于默认端口 2233：如果有任何 graftcp-local 进程在运行，就认定是它占用的
+  #      （因为旧版 graftcp-local 不带 -listen 参数，使用默认端口 2233）
+  #   2. 对于其他端口：检查是否有带 -listen :PORT 参数的 graftcp-local 进程
+  
+  local graftcp_running="false"
+  local graftcp_with_port="false"
+  
+  # 检测是否有任何 graftcp-local 进程在运行
   if command -v pgrep >/dev/null 2>&1; then
-    if pgrep -f "graftcp-local.*:${port}" >/dev/null 2>&1; then
-      PORT_OCCUPIED_BY_GRAFTCP="true"
+    if pgrep -f "graftcp-local" >/dev/null 2>&1; then
+      graftcp_running="true"
+      # 检查是否有指定该端口的进程
+      if pgrep -f "graftcp-local.*-listen.*:${port}" >/dev/null 2>&1; then
+        graftcp_with_port="true"
+      fi
+    fi
+  else
+    # 使用 ps + grep 作为备用
+    if ps aux 2>/dev/null | grep -v grep | grep -q "graftcp-local"; then
+      graftcp_running="true"
+      if ps aux 2>/dev/null | grep -v grep | grep -q "graftcp-local.*-listen.*:${port}"; then
+        graftcp_with_port="true"
+      fi
     fi
   fi
   
-  # 方式 2：如果 pgrep 未找到，检查是否存在 FIFO 文件
-  if [ "${PORT_OCCUPIED_BY_GRAFTCP}" = "false" ]; then
-    if [ -e "${INSTALL_ROOT}/graftcp-local-${port}.fifo" ]; then
-      # FIFO 文件存在，进一步用 ss/lsof 确认端口确实被 graftcp-local 使用
-      # 这种情况可能是进程名不完全匹配 pgrep 模式
-      if command -v lsof >/dev/null 2>&1; then
-        if lsof -i ":${port}" 2>/dev/null | grep -qi "graftcp"; then
-          PORT_OCCUPIED_BY_GRAFTCP="true"
-        fi
-      fi
-    fi
+  # 判断端口是否被 graftcp-local 占用
+  if [ "${port}" = "2233" ] && [ "${graftcp_running}" = "true" ]; then
+    # 默认端口 2233：只要有 graftcp-local 运行就认定是它
+    PORT_OCCUPIED_BY_GRAFTCP="true"
+  elif [ "${graftcp_with_port}" = "true" ]; then
+    # 非默认端口：需要明确匹配 -listen :PORT 参数
+    PORT_OCCUPIED_BY_GRAFTCP="true"
   fi
   return 0
 }
