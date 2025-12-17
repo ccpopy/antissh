@@ -37,6 +37,18 @@ GRAFTCP_PIPE_PATH=""   # graftcp-local FIFO 路径（多实例支持）
 # 设置 umask 确保新建文件权限安全 (600 for files, 700 for dirs)
 umask 077
 
+# 临时文件清理函数（在脚本退出时调用）
+# 用于清理可能残留的临时文件
+TEMP_FILES_TO_CLEANUP=()
+cleanup_temp_files() {
+  for tmp_file in "${TEMP_FILES_TO_CLEANUP[@]}"; do
+    if [ -n "${tmp_file}" ] && [ -f "${tmp_file}" ]; then
+      rm -f "${tmp_file}" 2>/dev/null || true
+    fi
+  done
+}
+trap cleanup_temp_files EXIT
+
 ################################ Bash 版本检查 ################################
 
 check_bash_version() {
@@ -70,24 +82,34 @@ check_bash_version
 
 ################################ 兼容性 Helper 函数 ################################
 
-# 获取文件修改时间（epoch 秒）
-# 成功返回 epoch，失败返回空字符串
+# 函数名：get_file_mtime
+# 功能：获取文件修改时间（epoch 秒）
+# 参数：$1 - 文件路径
+# 返回：0 成功（输出 epoch 时间戳）/ 1 失败（输出空字符串）
 get_file_mtime() {
   local file="$1"
   # GNU stat
   stat -c '%Y' -- "${file}" 2>/dev/null && return 0
-  # 降级：返回空
+  # BusyBox stat (输出格式不同，第 12 个字段是 mtime)
+  local busybox_stat
+  busybox_stat=$(stat -t -- "${file}" 2>/dev/null) && {
+    echo "${busybox_stat}" | awk '{print $12}'
+    return 0
+  }
+  # 降级处理：无法获取 mtime 时返回空
   echo ""
   return 1
 }
 
-# 将 epoch 时间戳格式化为人类可读日期
-# 失败返回 "unknown"
+# 函数名：format_date_from_epoch
+# 功能：将 epoch 时间戳格式化为人类可读日期
+# 参数：$1 - epoch 时间戳
+# 返回：0 成功 / 1 失败（输出 "unknown"）
 format_date_from_epoch() {
   local epoch="$1"
   # GNU date
   date -d "@${epoch}" '+%F %T %z' 2>/dev/null && return 0
-  # 降级
+  # 降级处理：无法格式化时返回 unknown
   echo "unknown"
   return 1
 }
@@ -126,22 +148,27 @@ safe_rm_rf() {
   esac
 }
 
-# 创建安全临时文件
+# 函数名：safe_mktemp
+# 功能：创建安全临时文件
+# 参数：$1 - 文件名前缀
+# 返回：0 成功（输出临时文件路径）/ 1 失败
 # 用法：wrapper_tmp=$(safe_mktemp "${prefix}")
 safe_mktemp() {
   local prefix="$1"
   if command -v mktemp >/dev/null 2>&1; then
     mktemp "${prefix}.XXXXXX" && return 0
   fi
-  # fallback
+  # 降级处理：mktemp 不可用时的备用方案
   local tmp="${prefix}.$$.$RANDOM"
   : > "${tmp}" && echo "${tmp}" && return 0
   return 1
 }
 
-# 检查端口是否被占用（不依赖 root 获取 PID）
+# 函数名：check_port_occupied
+# 功能：检查端口是否被占用（不依赖 root 获取 PID）
+# 参数：$1 - 端口号
 # 返回：0 = 被占用，1 = 未被占用
-# 设置变量：PORT_OCCUPIED_BY_GRAFTCP
+# 设置变量：PORT_OCCUPIED_BY_GRAFTCP ("true" 或 "false")
 PORT_OCCUPIED_BY_GRAFTCP="false"
 check_port_occupied() {
   local port="$1"
@@ -149,12 +176,13 @@ check_port_occupied() {
   local occupied="false"
 
   # ss 不需要 root 就能判断是否占用
+  # 使用 awk 进行精确端口匹配，避免正则误匹配（如 22 匹配到 2233）
   if command -v ss >/dev/null 2>&1; then
-    if ss -tln 2>/dev/null | grep -q ":${port} "; then
+    if ss -tln 2>/dev/null | awk -v p="${port}" '$4 ~ ":"p"$" || $4 ~ "\\]":"p"$" {found=1; exit} END {exit !found}'; then
       occupied="true"
     fi
   elif command -v netstat >/dev/null 2>&1; then
-    if netstat -tln 2>/dev/null | grep -q ":${port} "; then
+    if netstat -tln 2>/dev/null | awk -v p="${port}" '$4 ~ ":"p"$" {found=1; exit} END {exit !found}'; then
       occupied="true"
     fi
   fi
@@ -173,21 +201,27 @@ check_port_occupied() {
   local graftcp_with_port="false"
   
   # 检测是否有任何 graftcp-local 进程在运行
+  # 使用更精确的匹配模式，避免误匹配（如 vim graftcp-local.log）
   if command -v pgrep >/dev/null 2>&1; then
-    if pgrep -f "graftcp-local" >/dev/null 2>&1; then
+    if pgrep -f "graftcp-local.*-listen" >/dev/null 2>&1; then
       graftcp_running="true"
       # 检查是否有指定该端口的进程
-      if pgrep -f "graftcp-local.*-listen.*:${port}" >/dev/null 2>&1; then
+      if pgrep -f "graftcp-local.*-listen[[:space:]]+:${port}([[:space:]]|$)" >/dev/null 2>&1; then
         graftcp_with_port="true"
       fi
+    elif pgrep -x "graftcp-local" >/dev/null 2>&1; then
+      # 没有 -listen 参数的旧版 graftcp-local（使用默认端口）
+      graftcp_running="true"
     fi
   else
     # 使用 ps + grep 作为备用
-    if ps aux 2>/dev/null | grep -v grep | grep -q "graftcp-local"; then
+    if ps aux 2>/dev/null | grep -v grep | grep -q "[g]raftcp-local.*-listen"; then
       graftcp_running="true"
-      if ps aux 2>/dev/null | grep -v grep | grep -q "graftcp-local.*-listen.*:${port}"; then
+      if ps aux 2>/dev/null | grep -v grep | grep -Eq "[g]raftcp-local.*-listen[[:space:]]+:${port}([[:space:]]|$)"; then
         graftcp_with_port="true"
       fi
+    elif ps aux 2>/dev/null | grep -v grep | grep -q "[g]raftcp-local"; then
+      graftcp_running="true"
     fi
   fi
   
@@ -204,14 +238,24 @@ check_port_occupied() {
 
 ################################ 日志输出 ################################
 
+# 函数名：log
+# 功能：输出信息日志到标准输出和日志文件
+# 参数：$* - 日志内容
 log() {
   echo "[INFO] $*" | tee -a "${INSTALL_LOG}"
 }
 
+# 函数名：warn
+# 功能：输出警告日志到标准错误和日志文件
+# 参数：$* - 警告内容
 warn() {
   echo "[WARN] $*" | tee -a "${INSTALL_LOG}" >&2
 }
 
+# 函数名：error
+# 功能：输出错误日志并退出脚本
+# 参数：$* - 错误内容
+# 返回：不返回，直接 exit 1
 error() {
   echo "[ERROR] $*" | tee -a "${INSTALL_LOG}" >&2
   echo "安装失败，可查看日志：${INSTALL_LOG}"
@@ -682,6 +726,9 @@ probe_and_export_proxy() {
 
 ################################ 依赖检查/安装 ################################
 
+# 函数名：detect_pkg_manager
+# 功能：检测系统使用的包管理器
+# 设置变量：PM (“apt”, “dnf”, “yum”, “pacman”, “zypper” 或 空字符串)
 detect_pkg_manager() {
   if command -v apt-get >/dev/null 2>&1; then
     PM="apt"
@@ -701,6 +748,9 @@ detect_pkg_manager() {
 # 全局变量：是否需要兼容旧版本 Go，兼容模式将移除 toolchain 指令
 NEED_GO_COMPAT="false"
 
+# 函数名：check_go_version
+# 功能：检查 Go 版本是否满足要求（>= 1.13），并处理 toolchain 兼容性
+# 设置变量：NEED_GO_COMPAT (“true” 如果需要兼容模式)
 check_go_version() {
   if ! command -v go >/dev/null 2>&1; then
     # 缺 go 的情况交给依赖安装逻辑
@@ -884,6 +934,9 @@ upgrade_go_version() {
   NEED_GO_COMPAT="false"
 }
 
+# 函数名：ensure_dependencies
+# 功能：检查并安装编译 graftcp 所需的依赖（git, make, gcc, go, curl）
+# 错误处理：依赖安装失败时调用 error() 退出
 ensure_dependencies() {
   detect_pkg_manager
 
@@ -922,49 +975,63 @@ ensure_dependencies() {
 
   log "缺少依赖：${missing[*]}，使用 ${PM} 自动安装..."
 
+  # 声明 install_result 变量（在 case 之前声明，避免 local 重置 PIPESTATUS）
+  local install_result=0
+  local pipestatus_arr
+
   case "${PM}" in
     apt)
       ${SUDO} apt-get update | tee -a "${INSTALL_LOG}"
       # 安装核心编译依赖 + curl + procps（pgrep/pkill）+ 可选的 net-tools（netstat）
       ${SUDO} apt-get install -y git make gcc golang-go curl procps net-tools 2>&1 | tee -a "${INSTALL_LOG}"
-      local install_result="${PIPESTATUS[0]}"
+      pipestatus_arr=("${PIPESTATUS[@]}")
+      install_result="${pipestatus_arr[0]}"
       if [ "${install_result}" -ne 0 ]; then
         # 回退到不包含 net-tools 的版本
         ${SUDO} apt-get install -y git make gcc golang-go curl procps 2>&1 | tee -a "${INSTALL_LOG}"
-        install_result="${PIPESTATUS[0]}"
+        pipestatus_arr=("${PIPESTATUS[@]}")
+        install_result="${pipestatus_arr[0]}"
       fi
       ;;
     dnf)
       ${SUDO} dnf install -y git make gcc golang curl procps-ng net-tools 2>&1 | tee -a "${INSTALL_LOG}"
-      local install_result="${PIPESTATUS[0]}"
+      pipestatus_arr=("${PIPESTATUS[@]}")
+      install_result="${pipestatus_arr[0]}"
       if [ "${install_result}" -ne 0 ]; then
         ${SUDO} dnf install -y git make gcc golang curl procps-ng 2>&1 | tee -a "${INSTALL_LOG}"
-        install_result="${PIPESTATUS[0]}"
+        pipestatus_arr=("${PIPESTATUS[@]}")
+        install_result="${pipestatus_arr[0]}"
       fi
       ;;
     yum)
       ${SUDO} yum install -y git make gcc golang curl procps-ng net-tools 2>&1 | tee -a "${INSTALL_LOG}"
-      local install_result="${PIPESTATUS[0]}"
+      pipestatus_arr=("${PIPESTATUS[@]}")
+      install_result="${pipestatus_arr[0]}"
       if [ "${install_result}" -ne 0 ]; then
         ${SUDO} yum install -y git make gcc golang curl procps-ng 2>&1 | tee -a "${INSTALL_LOG}"
-        install_result="${PIPESTATUS[0]}"
+        pipestatus_arr=("${PIPESTATUS[@]}")
+        install_result="${pipestatus_arr[0]}"
       fi
       ;;
     pacman)
       ${SUDO} pacman -Sy --noconfirm git base-devel go curl procps-ng net-tools 2>&1 | tee -a "${INSTALL_LOG}"
-      local install_result="${PIPESTATUS[0]}"
+      pipestatus_arr=("${PIPESTATUS[@]}")
+      install_result="${pipestatus_arr[0]}"
       if [ "${install_result}" -ne 0 ]; then
         ${SUDO} pacman -Sy --noconfirm git base-devel go curl procps-ng 2>&1 | tee -a "${INSTALL_LOG}"
-        install_result="${PIPESTATUS[0]}"
+        pipestatus_arr=("${PIPESTATUS[@]}")
+        install_result="${pipestatus_arr[0]}"
       fi
       ;;
     zypper)
       ${SUDO} zypper refresh | tee -a "${INSTALL_LOG}"
       ${SUDO} zypper install -y git make gcc go curl procps net-tools 2>&1 | tee -a "${INSTALL_LOG}"
-      local install_result="${PIPESTATUS[0]}"
+      pipestatus_arr=("${PIPESTATUS[@]}")
+      install_result="${pipestatus_arr[0]}"
       if [ "${install_result}" -ne 0 ]; then
         ${SUDO} zypper install -y git make gcc go curl procps 2>&1 | tee -a "${INSTALL_LOG}"
-        install_result="${PIPESTATUS[0]}"
+        pipestatus_arr=("${PIPESTATUS[@]}")
+        install_result="${pipestatus_arr[0]}"
       fi
       ;;
     *)
@@ -990,6 +1057,10 @@ ensure_dependencies() {
 
 ################################ 安装 / 编译 graftcp ################################
 
+# 函数名：install_graftcp
+# 功能：安装或编译 graftcp 工具
+# 设置变量：GRAFTCP_DIR
+# 错误处理：克隆或编译失败时调用 error() 退出
 install_graftcp() {
   # 检查用户是否通过环境变量指定了 graftcp 目录
   if [ -n "${GRAFTCP_DIR:-}" ]; then
@@ -1217,6 +1288,10 @@ install_graftcp() {
 
 ################################ 查找 language_server_* ################################
 
+# 函数名：find_language_server
+# 功能：查找 Antigravity 的 language_server_* 可执行文件
+# 设置变量：TARGET_BIN
+# 错误处理：未找到时调用 error() 退出
 find_language_server() {
   local pattern base current_user
   pattern="language_server_linux_"
@@ -1358,16 +1433,28 @@ find_language_server() {
 
 ################################ 写入 wrapper ################################
 
+# 函数名：setup_wrapper
+# 功能：备份原始 Agent 并生成代理 wrapper 脚本
+# 设置变量：BACKUP_BIN
+# 错误处理：备份或写入失败时调用 error() 退出
 setup_wrapper() {
   BACKUP_BIN="${TARGET_BIN}.bak"
   
-  # Wrapper 脚本的签名标识
+  # Wrapper 脚本的签名标识（可能包含旧的签名）
   local WRAPPER_SIGNATURE="# 该文件由 antissh.sh 自动生成"
+  local WRAPPER_SIGNATURE_OLD="# 该文件由 antigravity-set.sh 自动生成"
+  
+  # 检测函数：判断文件是否为 wrapper 脚本
+  is_wrapper_script() {
+    local file="$1"
+    grep -q "${WRAPPER_SIGNATURE}" "${file}" 2>/dev/null || \
+    grep -q "${WRAPPER_SIGNATURE_OLD}" "${file}" 2>/dev/null
+  }
 
   if [ -f "${BACKUP_BIN}" ]; then
     # .bak 文件存在，说明之前执行过脚本
     # 需要验证当前的 TARGET_BIN 是否为 wrapper 脚本
-    if grep -q "${WRAPPER_SIGNATURE}" "${TARGET_BIN}" 2>/dev/null; then
+    if is_wrapper_script "${TARGET_BIN}"; then
       # 当前文件是 wrapper 脚本，直接更新即可
       log "检测到已有备份文件：${BACKUP_BIN}"
       log "当前文件已是 wrapper 脚本，将更新代理配置"
@@ -1404,7 +1491,7 @@ setup_wrapper() {
   else
     # .bak 文件不存在
     # 检查当前文件是否为 wrapper（防止意外情况）
-    if grep -q "${WRAPPER_SIGNATURE}" "${TARGET_BIN}" 2>/dev/null; then
+    if is_wrapper_script "${TARGET_BIN}"; then
       error "异常：${TARGET_BIN} 是 wrapper 脚本，但备份文件 ${BACKUP_BIN} 不存在！请手动检查。"
     fi
     
@@ -1416,6 +1503,8 @@ setup_wrapper() {
   # 生成 wrapper 脚本（使用原子写入：先写临时文件，再移动到目标位置）
   local wrapper_tmp
   wrapper_tmp=$(safe_mktemp "${TARGET_BIN}.tmp") || error "无法创建临时文件"
+  # 注册临时文件到清理列表，确保脚本异常退出时也能清理
+  TEMP_FILES_TO_CLEANUP+=("${wrapper_tmp}")
   
   cat > "${wrapper_tmp}" <<EOF
 #!/usr/bin/env bash
@@ -1489,6 +1578,9 @@ EOF
 
 ################################ 测试代理连通性 ################################
 
+# 函数名：test_proxy
+# 功能：测试代理连通性，通过 graftcp 访问 google.com
+# 返回：0 成功 / 用户确认继续，非 0 失败及退出
 test_proxy() {
   echo ""
   echo "============================================="
@@ -1553,7 +1645,8 @@ test_proxy() {
           log "进程已成功终止"
           break
         fi
-        sleep 0.5
+        # 兼容处理：sleep 0.5 在某些 BusyBox 环境不支持小数秒
+        sleep 0.5 2>/dev/null || sleep 1
         wait_count=$((wait_count + 1))
       done
       
@@ -1561,7 +1654,7 @@ test_proxy() {
       if kill -0 "${port_pid}" 2>/dev/null; then
         warn "进程未响应 SIGTERM，发送 SIGKILL 强制终止..."
         kill -9 "${port_pid}" 2>/dev/null || true
-        sleep 0.5
+        sleep 0.5 2>/dev/null || sleep 1
       fi
       
       # 再次确认端口已释放
@@ -1571,7 +1664,7 @@ test_proxy() {
            ! netstat -tln 2>/dev/null | grep -q ":${GRAFTCP_LOCAL_PORT} "; then
           break
         fi
-        sleep 0.5
+        sleep 0.5 2>/dev/null || sleep 1
         port_check_count=$((port_check_count + 1))
       done
       
@@ -1612,9 +1705,12 @@ test_proxy() {
     # 端口未被占用，启动 graftcp-local
     log "启动 graftcp-local 进行测试..."
 
-    # 停止可能存在的旧进程
-    pkill -f "${GRAFTCP_DIR}/local/graftcp-local" 2>/dev/null || true
-    sleep 0.5
+    # 停止可能存在的旧进程（使用 FIFO 路径精确匹配，避免误杀其他用户的实例）
+    if [ -n "${GRAFTCP_PIPE_PATH}" ]; then
+      pkill -f "${GRAFTCP_PIPE_PATH}" 2>/dev/null || true
+    fi
+    # 兼容处理：sleep 0.5 在某些 BusyBox 环境不支持小数秒
+    sleep 0.5 2>/dev/null || sleep 1
 
     # 启动 graftcp-local
     if [ "${PROXY_TYPE}" = "http" ]; then
@@ -1718,6 +1814,8 @@ test_proxy() {
 
 ################################ 主流程 ################################
 
+# 函数名：main
+# 功能：脚本主入口，协调所有配置步骤
 main() {
   echo "==== Antigravity + graftcp 一键配置脚本 ===="
   echo "支持系统：Linux"
