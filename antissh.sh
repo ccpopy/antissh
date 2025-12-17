@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env bash
+#!/usr/bin/env bash
 #
 # Antigravity Agent + graftcp 一键配置脚本
 # 支持：Linux（macOS 需使用 Proxifier 等替代方案）
