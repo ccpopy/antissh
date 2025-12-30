@@ -1384,20 +1384,71 @@ fi
     TARGET_BIN="${candidates[0]}"
     log "找到 Agent 服务：${TARGET_BIN}"
   else
-    log "检测到多个 language_server 文件，正在自动选择最新版本..."
+    log "检测到多个 language_server 文件（${#candidates[@]} 个）"
 
-    # 自动选择最新版本：按文件修改时间排序（从新到旧），取第一个
-    TARGET_BIN=$(
-      for p in "${candidates[@]}"; do
-        printf '%s %s\n' "$(get_file_mtime "${p}" 2>/dev/null || echo 0)" "${p}"
-      done | sort -rn | head -n 1 | cut -d' ' -f2-
-    )
+    # 多用户场景：优先选择当前用户主目录下的文件
+    local user_candidates=()
+    local other_candidates=()
 
-    if [ -z "${TARGET_BIN}" ]; then
-      error "自动选择最新 Agent 服务失败，请检查文件权限。"
+    for p in "${candidates[@]}"; do
+      if [[ "${p}" == "${HOME}/"* ]]; then
+        user_candidates+=("${p}")
+      else
+        other_candidates+=("${p}")
+      fi
+    done
+
+    # 优先使用当前用户的文件
+    if [ "${#user_candidates[@]}" -gt 0 ]; then
+      if [ "${#user_candidates[@]}" -eq 1 ]; then
+        TARGET_BIN="${user_candidates[0]}"
+        log "选择当前用户的 Agent 服务：${TARGET_BIN}"
+      else
+        # 多个当前用户的文件，按修改时间选择最新的
+        log "当前用户有多个版本，选择最新版本..."
+        TARGET_BIN=$(
+          for p in "${user_candidates[@]}"; do
+            printf '%s %s\n' "$(get_file_mtime "${p}" 2>/dev/null || echo 0)" "${p}"
+          done | sort -rn | head -n 1 | cut -d' ' -f2-
+        )
+        log "已选择最新版本：${TARGET_BIN}"
+      fi
+    else
+      # 没有当前用户的文件，检查其他用户的文件是否有权限
+      warn "未找到当前用户（${current_user}）的 language_server"
+      log "检测到其他用户的文件，正在检查权限..."
+
+      local accessible_candidates=()
+      for p in "${other_candidates[@]}"; do
+        # 检查是否有读写权限
+        if [ -r "${p}" ] && [ -w "$(dirname "${p}")" ]; then
+          accessible_candidates+=("${p}")
+        fi
+      done
+
+      if [ "${#accessible_candidates[@]}" -eq 0 ]; then
+        echo ""
+        echo "❌ 检测到 ${#other_candidates[@]} 个其他用户的 language_server，但当前用户无权限修改："
+        for p in "${other_candidates[@]}"; do
+          echo "  - ${p}"
+        done
+        echo ""
+        error "请确保 Antigravity 已安装在当前用户目录（${HOME}/.antigravity-server）"
+      fi
+
+      # 选择有权限的最新文件
+      TARGET_BIN=$(
+        for p in "${accessible_candidates[@]}"; do
+          printf '%s %s\n' "$(get_file_mtime "${p}" 2>/dev/null || echo 0)" "${p}"
+        done | sort -rn | head -n 1 | cut -d' ' -f2-
+      )
+
+      warn "将使用其他用户的文件（请确认这是您期望的行为）：${TARGET_BIN}"
     fi
 
-    log "已自动选择最新版本：${TARGET_BIN}"
+    if [ -z "${TARGET_BIN}" ]; then
+      error "自动选择 Agent 服务失败，请检查文件权限。"
+    fi
   fi
 }
 
