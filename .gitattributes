@@ -1,2 +1,8 @@
 # Force LF line endings for shell scripts
 *.sh text eol=lf
+
+# Force LF line endings for Markdown docs
+*.md text eol=lf
+
+# Keep attributes file itself stable
+.gitattributes text eol=lf

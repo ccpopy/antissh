@@ -116,7 +116,7 @@ echo "unknown"
 return 1
 }
 
-# 原地编辑文件（兼容处理）
+# 原地编辑文件（兼容不同 sed 实现）
 sed_inplace() {
 local pattern="$1"
 local file="$2"
@@ -428,7 +428,8 @@ return 0
 }
 
 # 解析代理 URL 并设置全局变量 PROXY_TYPE 和 PROXY_URL
-# 输入格式：socks5://127.0.0.1:10808 或 http://127.0.0.1:10809
+# 输入格式：socks5://HOST:PORT 或 http://HOST:PORT
+# 兼容：socks5h:// 会按 socks5:// 处理；https:// 会按 http:// 处理
 # 返回 0 表示解析成功，1 表示格式错误
 # 错误信息存储在 PARSE_ERROR 变量中
 PARSE_ERROR=""
@@ -441,7 +442,7 @@ PARSE_ERROR=""
 
 # 检查是否包含协议前缀
 if ! echo "${input}" | grep -Eq '^(socks5h?|https?|http)://'; then
-PARSE_ERROR="代理地址必须以 socks5:// 或 http:// 开头"
+PARSE_ERROR="代理地址必须包含协议前缀（socks5:// 或 http://；兼容 socks5h://、https://）"
 return 1
 fi
 
@@ -644,7 +645,7 @@ echo ""
 continue
 fi
 
-# 使用改进的端口检测（不依赖 root 权限获取 PID）
+# 检测端口是否被占用（不依赖 root 获取 PID）
 if check_port_occupied "${port_input}"; then
 # 端口被占用
 if [ "${PORT_OCCUPIED_BY_GRAFTCP}" = "true" ]; then
@@ -690,10 +691,10 @@ else
 proxy_full_url="http://${PROXY_URL}"
 fi
 
-log "正在快速探测代理可用性...（超时 3 秒）"
+log "正在快速探测代理可用性...（连接超时 3 秒，总超时 5 秒）"
 
 # 使用 curl 进行轻量级探测
-# 尝试访问一个快速响应的地址
+# 尝试访问一个快速响应的地址（目标可能被网络策略阻断；失败不影响后续流程）
 local probe_result=1
 
 if [ "${PROXY_TYPE}" = "socks5" ]; then
@@ -1481,9 +1482,9 @@ if is_wrapper_script "${TARGET_BIN}"; then
 log "检测到已有备份文件：${BACKUP_BIN}"
 log "当前文件已是 wrapper 脚本，将更新代理配置"
 else
-# 当前文件不是 wrapper 脚本，但 .bak 已存在
-# 这是异常情况，可能是手动恢复过或其他问题
-warn "检测到异常情况：${BACKUP_BIN} 存在，但 ${TARGET_BIN} 不是 wrapper 脚本"
+# .bak 已存在但当前文件不是 wrapper：备份与当前可执行文件已不再对应
+# 常见原因：手动恢复原始文件 / 升级覆盖 wrapper / 文件被替换
+warn "检测到备份与当前文件不一致：${BACKUP_BIN} 存在，但 ${TARGET_BIN} 不是 wrapper 脚本"
 echo ""
 echo "可能的原因："
 echo "  1. 之前手动恢复过原始文件"
@@ -1512,7 +1513,7 @@ esac
 fi
 else
 # .bak 文件不存在
-# 检查当前文件是否为 wrapper（防止意外情况）
+# .bak 不存在但当前文件是 wrapper：说明备份文件丢失或被清理
 if is_wrapper_script "${TARGET_BIN}"; then
 error "异常：${TARGET_BIN} 是 wrapper 脚本，但备份文件 ${BACKUP_BIN} 不存在！请手动检查。"
 fi
@@ -1522,7 +1523,7 @@ log "备份原始 Agent 服务到：${BACKUP_BIN}"
 mv "${TARGET_BIN}" "${BACKUP_BIN}" || error "备份失败：无法移动 ${TARGET_BIN} -> ${BACKUP_BIN}"
 fi
 
-# 生成 wrapper 脚本（使用原子写入：先写临时文件，再移动到目标位置）
+# 生成 wrapper 脚本（先写临时文件，再 mv 覆盖，尽量保证写入原子性）
 local wrapper_tmp
 wrapper_tmp=$(safe_mktemp "${TARGET_BIN}.tmp") || error "无法创建临时文件"
 # 注册临时文件到清理列表，确保脚本异常退出时也能清理
@@ -1576,7 +1577,7 @@ else
  export GODEBUG="netdns=cgo,http2client=0,tls13=0"
 fi
 
-# 使用 graftcp 启动备份的原始 Agent 服务（指定端口和 FIFO 路径）取消环境变量，防止循环代理
+# 通过 graftcp 启动原始二进制（指定端口与 FIFO），并清除代理相关环境变量，避免递归代理/死循环
 exec "\$GRAFTCP_DIR/graftcp" -p "\$GRAFTCP_LOCAL_PORT" -f "\$GRAFTCP_PIPE_PATH" env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy "\$0.bak" "\$@"
 EOF
 
@@ -1656,7 +1657,7 @@ if [ "${is_graftcp_local}" = "true" ]; then
 log "端口 ${GRAFTCP_LOCAL_PORT} 已被 graftcp-local 服务占用"
 log "将停止现有服务并使用新的代理配置重启..."
 
-# 停止现有的 graftcp-local（使用更可靠的方式）
+# 停止现有 graftcp-local：先 SIGTERM，超时后 SIGKILL
 log "正在停止旧进程 (PID: ${port_pid})..."
 
 # 先发送 SIGTERM 优雅终止
@@ -1729,7 +1730,7 @@ else
 # 端口未被占用，启动 graftcp-local
 log "启动 graftcp-local 进行测试..."
 
-# 停止可能存在的旧进程（使用 FIFO 路径精确匹配，避免误杀其他用户的实例）
+# 仅按 FIFO 路径匹配停止进程，避免误杀其他实例
 if [ -n "${GRAFTCP_PIPE_PATH}" ]; then
 pkill -f "${GRAFTCP_PIPE_PATH}" 2>/dev/null || true
 fi
@@ -1761,7 +1762,7 @@ exit 1
 fi
 fi
 
-# 使用 graftcp 测试访问 google.com
+# 通过 graftcp 发起外网请求作为连通性验证（目标为 google.com，可能被网络策略阻断）
 log "测试通过代理访问 google.com..."
 
 # 等待 graftcp-local 完全初始化并与代理建立连接
@@ -1780,7 +1781,7 @@ log "第 ${retry_count} 次尝试测试代理..."
 sleep 1
 fi
 
-# 强制 unset 代理环境变量，防止 curl 直接连接代理导致死循环
+# 清除代理相关环境变量，避免 curl 走系统代理导致递归代理/死循环
 http_code=$("${GRAFTCP_DIR}/graftcp" -p "${GRAFTCP_LOCAL_PORT}" -f "${GRAFTCP_PIPE_PATH}" env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
 
 # 如果成功，跳出循环

@@ -6,9 +6,9 @@
 
 | 系统        | 支持情况      | 说明                           |
 | ----------- | ------------- | ------------------------------ |
-| **Linux**   | ✅ 完全支持   | 使用 graftcp 自动代理          |
-| **macOS**   | ⚠️ 需替代方案 | 推荐使用 Proxifier 或 TUN 模式 |
-| **Windows** | ⚠️ 需替代方案 | 推荐使用 Proxifier 或 TUN 模式 |
+| **Linux**   | 支持          | 使用 graftcp 自动代理（脚本为 Bash，需 Bash >= 4） |
+| **macOS**   | 不支持        | graftcp 依赖 Linux 的 `ptrace`，推荐使用 Proxifier 或 TUN 模式 |
+| **Windows** | 不支持        | 推荐使用 Proxifier 或 TUN 模式；WSL 可按 Linux 方式使用 |
 
 ## Linux 使用方法
 
