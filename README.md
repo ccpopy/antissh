@@ -211,7 +211,7 @@ export HTTPS_PROXY=http://127.0.0.1:10809
 
 ## Antigravity Server 手动安装脚本
 
-IDE 一般会在远程连接时下载一个.antigravity-server 目录，如果远程服务器无法自动下载 Antigravity Server（如网络受限环境），，可使用 `installAntigravity.sh` 脚本手动安装。
+IDE 一般会在远程连接时下载一个.antigravity-server 目录，如果远程服务器无法自动下载 Antigravity Server（如网络受限环境），可使用 `installAntigravity.sh` 脚本手动安装。
 
 ### 下载脚本
 
