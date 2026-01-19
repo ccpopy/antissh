@@ -1177,6 +1177,9 @@ for gomod in go.mod local/go.mod; do
 if [ -f "${gomod}" ] && grep -q '^toolchain' "${gomod}"; then
 log "  移除 ${gomod} 中的 toolchain 行"
 sed_inplace '/^toolchain/d' "${gomod}"
+# 2. 修正版本号：将 go 1.23.0 这种格式改为 go 1.23
+sed_inplace 's/^go \([0-9]\+\.[0-9]\+\)\.[0-9]\+/go \1/' "${gomod}"
+log "  已处理 ${gomod}"
 fi
 done
 fi
