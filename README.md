@@ -143,6 +143,31 @@ graftcp-local 服务需要监听一个本地端口（默认 2233）。在多用�
 > - **端口配置复用**：wrapper 脚本中保存了完整的配置（包括端口），直接复制即可保持端口配置不变
 > - **重新运行脚本**：如果选择重新运行脚本，需要再次输入相同的端口号
 
+### 常见问题与排查（WSL2 / 代理）
+
+根据 issues 提及到的，下面是相关说明：
+
+- **.bak 文件是预期行为**：`.bak` 是原始二进制，`language_server_*` 会被 wrapper 替换；wrapper 使用 `graftcp` 启动 `.bak`，这是正常流程。
+- **看到 auto（自动转发）**：脚本启动 `graftcp-local` 时使用 `-select_proxy_mode=only_*`，理论上是“用户转发”。若实际看到 auto，多半是复用了旧的 `graftcp-local` 进程或端口。建议先清理旧进程后重新配置。
+- **脚本运行了但远程仍加载不到模型**：通常是本地 IDE 的代理未正常工作。请先确保本地 IDE 能正常加载模型，再在 WSL2 中运行脚本并重新连接。
+
+**清理旧进程（按需执行）**
+
+```bash
+# 先查看可能残留的进程
+pgrep -a graftcp-local || true
+pgrep -a language_server || true
+
+# 确认无用后再清理
+pkill -f graftcp-local || true
+pkill -f language_server || true
+```
+
+**本地 IDE 代理建议（二选一即可）**
+
+- Windows/macOS 使用 Proxifier 代理 IDE 进程
+- 使用代理的 TUN 模式
+
 ### WSL 网络配置（Mirrored 模式）
 
 如果你在 WSL 中使用本脚本，建议开启 **Mirrored 网络模式**，这样 WSL 可以直接使用宿主机的代理（127.0.0.1）。
