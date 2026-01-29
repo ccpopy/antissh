@@ -40,7 +40,8 @@ flowchart TD
     D -->|输入代理| E[解析并校验代理格式]
 
     E --> E1[配置 graftcp-local 端口]
-    E1 --> F[轻量级代理探测]
+    E1 --> E2[选择 DNS 解析策略]
+    E2 --> F[轻量级代理探测]
     F -->|成功| G1[导出 HTTP_PROXY 等环境变量]
     F -->|失败/超时| G2[继续使用镜像下载策略]
 
@@ -79,6 +80,7 @@ flowchart TD
   - SOCKS5: `socks5://127.0.0.1:10808`
   - HTTP: `http://127.0.0.1:10809`
 - 配置 graftcp-local 监听端口（默认 2233，多用户环境可自定义）
+- 选择 DNS 解析策略（默认强制系统 DNS）
 - 自动安装依赖和编译 graftcp
 - 自动查找并配置 language_server
 
@@ -150,6 +152,11 @@ graftcp-local 服务需要监听一个本地端口（默认 2233）。在多用�
 - **.bak 文件是预期行为**：`.bak` 是原始二进制，`language_server_*` 会被 wrapper 替换；wrapper 使用 `graftcp` 启动 `.bak`，这是正常流程。
 - **看到 auto（自动转发）**：脚本启动 `graftcp-local` 时使用 `-select_proxy_mode=only_*`，理论上是“用户转发”。若实际看到 auto，多半是复用了旧的 `graftcp-local` 进程或端口。建议先清理旧进程后重新配置。
 - **脚本运行了但远程仍加载不到模型**：通常是本地 IDE 的代理未正常工作。请先确保本地 IDE 能正常加载模型，再在 WSL2 中运行脚本并重新连接。
+- **特殊网络的 DNS 解析问题（SSH / WSL2）**：
+  - **SSH 远程**：有时 `curl` 通过代理访问 Google 是通的，但 `language_server` 仍报 DNS 错。原因是 `curl` 可能依赖代理解析（如 HTTP 代理或 socks5h），而当前 wrapper 默认强制使用系统 DNS（`netdns=cgo`），这两者并不等价。
+  - **建议**：如果 `nslookup` 正常但程序仍报 DNS 问题，可在脚本里选择“不强制系统 DNS”，并由你自己的 DNS 方案（如 smartdns / dnscrypt-proxy）接管解析。
+  - **WSL2**：Mirrored 网络模式下通常不会遇到解析 Google 的问题，一般无需关闭强制系统 DNS；若确实遇到特殊网络限制，再按上面的方案处理即可。
+  - 相关讨论：[#27](https://github.com/ccpopy/antissh/issues/27)
 
 **清理旧进程（按需执行）**
 
