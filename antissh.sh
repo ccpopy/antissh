@@ -28,6 +28,7 @@ TARGET_BIN=""  # language_server_* 路径
 BACKUP_BIN=""  # 备份路径 = ${TARGET_BIN}.bak
 GRAFTCP_LOCAL_PORT=""  # graftcp-local 监听端口（默认 2233）
 GRAFTCP_PIPE_PATH=""   # graftcp-local FIFO 路径（多实例支持）
+FORCE_SYSTEM_DNS="1"   # 默认强制使用系统 DNS（可选开关）
 
 ################################ 安全设置 ################################
 
@@ -672,6 +673,44 @@ done
 GRAFTCP_PIPE_PATH="${INSTALL_ROOT}/graftcp-local-${GRAFTCP_LOCAL_PORT}.fifo"
 
 log "graftcp-local 将使用端口 ${GRAFTCP_LOCAL_PORT}，FIFO 路径：${GRAFTCP_PIPE_PATH}"
+}
+
+################################ DNS 解析策略 ################################
+
+# 询问用户是否强制使用系统 DNS
+# 设置全局变量 FORCE_SYSTEM_DNS（1=强制，0=不强制）
+ask_dns_mode() {
+local choice=""
+
+echo ""
+echo "============================================="
+echo " DNS 解析策略"
+echo "============================================="
+echo "默认：强制使用系统 DNS（GODEBUG=netdns=cgo）"
+echo "说明："
+echo "  - 可减少 Go 内置解析在部分网络的异常"
+echo "  - 但在特殊网络场景，系统 DNS 可能被限制，导致 google 等域名解析失败"
+echo ""
+echo "如果你已配置 smartdns/dnscrypt-proxy 等本地 DNS（如将 /etc/resolv.conf 指向 127.0.0.1）"
+echo "可选择“不强制”，由你自己的 DNS 方案决定解析结果"
+echo "注意：该选项不会自动让 DNS 走代理"
+echo ""
+echo "请选择："
+echo "  - 输入 Y 或直接回车：强制使用系统 DNS（默认）"
+echo "  - 输入 N：不强制系统 DNS（交给用户自定义 DNS 方案）"
+read -r -p "请选择 [Y/n]（默认 Y）: " choice
+
+choice="${choice:-Y}"
+case "${choice}" in
+[Nn]*)
+FORCE_SYSTEM_DNS="0"
+;;
+*)
+FORCE_SYSTEM_DNS="1"
+;;
+esac
+
+log "DNS 策略：强制系统 DNS=${FORCE_SYSTEM_DNS}"
 }
 
 ################################ 轻量级代理可用性探测 ################################
@@ -1544,6 +1583,7 @@ PROXY_URL="${PROXY_URL}"
 PROXY_TYPE="${PROXY_TYPE}"
 GRAFTCP_LOCAL_PORT="${GRAFTCP_LOCAL_PORT}"
 GRAFTCP_PIPE_PATH="${GRAFTCP_PIPE_PATH}"
+ANTISSH_FORCE_SYSTEM_DNS="\${ANTISSH_FORCE_SYSTEM_DNS:-${FORCE_SYSTEM_DNS}}"
 LOG_FILE="\$HOME/.graftcp-antigravity/wrapper.log"
 
 mkdir -p "\$(dirname "\$LOG_FILE")"
@@ -1572,12 +1612,29 @@ if [ "\$graftcp_running" = "false" ]; then
 fi
 
 # 设置 GODEBUG，保留用户原有值并追加所需配置
-# 1. 强制使用系统 DNS (解决解析问题)
+# 1. 可选：强制使用系统 DNS（默认开启，可用 ANTISSH_FORCE_SYSTEM_DNS=0 关闭）
 # 2. 关闭 HTTP/2 客户端 (解决 EOF 等问题)
+# 3. 关闭 TLS 1.3 (避免部分环境握手问题)
+DNS_FORCE="\${ANTISSH_FORCE_SYSTEM_DNS:-1}"
+DNS_GODEBUG=""
+case "\${DNS_FORCE}" in
+  0|false|FALSE|no|NO|off|OFF)
+    DNS_GODEBUG=""
+    ;;
+  *)
+    DNS_GODEBUG="netdns=cgo"
+    ;;
+esac
+
+EXTRA_GODEBUG="http2client=0,tls13=0"
+if [ -n "\${DNS_GODEBUG}" ]; then
+  EXTRA_GODEBUG="\${DNS_GODEBUG},\${EXTRA_GODEBUG}"
+fi
+
 if [ -n "\${GODEBUG:-}" ]; then
- export GODEBUG="\$GODEBUG,netdns=cgo,http2client=0,tls13=0"
+  export GODEBUG="\${GODEBUG},\${EXTRA_GODEBUG}"
 else
- export GODEBUG="netdns=cgo,http2client=0,tls13=0"
+  export GODEBUG="\${EXTRA_GODEBUG}"
 fi
 
 # 通过 graftcp 启动原始二进制（指定端口与 FIFO），并清除代理相关环境变量，避免递归代理/死循环
@@ -1854,6 +1911,7 @@ main() {
   check_system
   ask_proxy
   ask_graftcp_port
+  ask_dns_mode
 
   # 轻量级探测代理可用性，成功则导出代理环境变量供后续 git/curl 使用（可选增益）
   # 探测失败不影响后续流程，继续走镜像下载策略
@@ -1877,6 +1935,12 @@ main() {
   echo "  2. 或手动编辑 wrapper 文件："
   echo "       ${TARGET_BIN}"
   echo "     修改其中的 PROXY_URL 和 PROXY_TYPE 后重启 antigravity。"
+  echo
+  echo "如需切换 DNS 策略："
+  echo "  1. 重新运行本脚本，在“DNS 解析策略”中选择。"
+  echo "  2. 或手动编辑 wrapper 文件："
+  echo "       ${TARGET_BIN}"
+  echo "     将 ANTISSH_FORCE_SYSTEM_DNS 设置为 1（强制）或 0（不强制）。"
   echo
   echo "如需完全恢复原始行为："
   echo "  mv \"${BACKUP_BIN}\" \"${TARGET_BIN}\""
