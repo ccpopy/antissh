@@ -1,14 +1,14 @@
-﻿# 反重力代理配置工具
+﻿﻿# 反重力代理配置工具
 
 为 反重力 Agent 配置代理，解决网络连接问题。
 
 ## 系统支持
 
-| 系统        | 支持情况 | 说明                                                           |
-| ----------- | -------- | -------------------------------------------------------------- |
-| **Linux**   | 支持     | 使用 graftcp 自动代理（脚本为 Bash，需 Bash >= 4）             |
-| **macOS**   | 不支持   | graftcp 依赖 Linux 的 `ptrace`，推荐使用 Proxifier 或 TUN 模式 |
-| **Windows** | 不支持   | 推荐使用 Proxifier 或 TUN 模式；WSL 可按 Linux 方式使用        |
+| 系统        | 支持情况 | 说明                                                                          |
+| ----------- | -------- | ----------------------------------------------------------------------------- |
+| **Linux**   | 支持     | 使用 graftcp 自动代理（脚本为 Bash，需 Bash >= 4）                            |
+| **macOS**   | 不支持   | graftcp 依赖 Linux 的 `ptrace`，推荐使用 Proxifier 或 TUN 模式                |
+| **Windows** | 不支持   | 推荐使用 Proxifier 或 TUN 模式 或 DLL 注入（见下文）；WSL 可按 Linux 方式使用 |
 
 ## Linux 使用方法
 
@@ -78,7 +78,7 @@ flowchart TD
 - 询问是否需要配置代理
 - 输入代理地址，格式如下：
   - SOCKS5: `socks5://127.0.0.1:10808`
-  - HTTP: `http://127.0.0.1:10809`
+  - HTTP: `http://127.0.0.1:10808`
 - 配置 graftcp-local 监听端口（默认 2233，多用户环境可自定义）
 - 选择 DNS 解析策略（默认强制系统 DNS）
 - 自动安装依赖和编译 graftcp
@@ -198,9 +198,9 @@ wsl --shutdown
 3. 重新进入 WSL 后，代理地址可直接使用 `127.0.0.1`：
 
 ```bash
-# 例如
+# 例如，v2rayN新版本一般使用的是混合监听端口：
 socks5://127.0.0.1:10808
-http://127.0.0.1:10809
+http://127.0.0.1:10808
 ```
 
 > **注意**：Mirrored 模式需要 Windows 11 22H2 及以上版本，且 WSL 版本 >= 2.0.0。
@@ -226,17 +226,21 @@ http://127.0.0.1:10809
      - Windows: `language_server_windows_x64.exe; Antigravity.exe`
    - Action 选择刚添加的代理
 
-### 推荐方案 2：TUN 模式
+### 推荐方案 2：通过 DLL 注入（仅 Windows 推荐）
+
+如果不想通过 TUN 模式或者编写代理规则，可以参考 [antigravity-proxy](https://github.com/yuaotian/antigravity-proxy)，通过 DLL 注入，仅支持 Windows。
+
+### 推荐方案 3：TUN 模式
 
 使用 Clash、Surge 等工具开启 TUN 模式，实现全局透明代理。
 
-### 方案 3：环境变量（不推荐）
+### 方案 4：环境变量（不推荐）
 
 Agent 服务可能无法走代理，仅供参考：
 
 ```bash
 export ALL_PROXY=socks5://127.0.0.1:10808
-export HTTPS_PROXY=http://127.0.0.1:10809
+export HTTPS_PROXY=http://127.0.0.1:10808
 ```
 
 ---
