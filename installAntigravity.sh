@@ -23,27 +23,42 @@ while IFS= read -r line; do
     version_info+="$line"$'\n'
 done
 
-# 解析 Version 和 Commit（兼容性处理：优先 grep -oP，不支持则使用 sed）
+# 解析 Version 和 Commit
+# 兼容两种格式:
+#   格式A (旧): Antigravity Version: 1.12.4 / Commit: da3eb231fb...
+#   格式B (关于对话框): 提交: 1.16.5 / Electron: 1504c8cc4b34...
+has_pcre() {
+    echo "test" | grep -oP 'test' >/dev/null 2>&1
+}
+
 parse_version() {
     local input="$1"
-    # 尝试 grep -oP (GNU grep with Perl regex)
-    if echo "test" | grep -oP 'test' >/dev/null 2>&1; then
-        echo "$input" | grep -oP 'Antigravity Version:\s*\K[\d.]+' | head -1
+    local result=""
+    if has_pcre; then
+        # 格式A: Antigravity Version: x.x.x
+        result=$(echo "$input" | grep -oP 'Antigravity Version:\s*\K[\d.]+' | head -1)
+        # 格式B: 提交: x.x.x ("关于"对话框中 "提交" 字段实际存放版本号)
+        [ -z "$result" ] && result=$(echo "$input" | grep -oP '提交:\s*\K[\d.]+' | head -1)
     else
-        # 降级到 sed (POSIX 兼容)
-        echo "$input" | sed -n 's/.*Antigravity Version:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1
+        result=$(echo "$input" | sed -n 's/.*Antigravity Version:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)
+        [ -z "$result" ] && result=$(echo "$input" | sed -n 's/.*提交:[[:space:]]*\([0-9.]*\).*/\1/p' | head -1)
     fi
+    echo "$result"
 }
 
 parse_commit() {
     local input="$1"
-    # 尝试 grep -oP (GNU grep with Perl regex)
-    if echo "test" | grep -oP 'test' >/dev/null 2>&1; then
-        echo "$input" | grep -oP 'Commit:\s*\K[a-f0-9]+' | head -1
+    local result=""
+    if has_pcre; then
+        # 格式A: Commit: xxxx
+        result=$(echo "$input" | grep -oP 'Commit:\s*\K[a-f0-9]+' | head -1)
+        # 格式B: Electron: xxxx (长 hex，≥32位，排除 ElectronBuildId)
+        [ -z "$result" ] && result=$(echo "$input" | grep -oP '^Electron:\s*\K[a-f0-9]{32,}' | head -1)
     else
-        # 降级到 sed (POSIX 兼容)
-        echo "$input" | sed -n 's/.*Commit:[[:space:]]*\([a-f0-9]*\).*/\1/p' | head -1
+        result=$(echo "$input" | sed -n 's/.*Commit:[[:space:]]*\([a-f0-9]*\).*/\1/p' | head -1)
+        [ -z "$result" ] && result=$(echo "$input" | sed -n '/^Electron:[[:space:]]*/{ s/^Electron:[[:space:]]*\([a-f0-9]\{32,\}\).*/\1/p; }' | head -1)
     fi
+    echo "$result"
 }
 
 version=$(parse_version "$version_info")
@@ -53,11 +68,19 @@ commitid=$(parse_commit "$version_info")
 if [ -z "$version" ] || [ -z "$commitid" ]; then
     echo ""
     echo "[错误] 无法解析版本信息！"
-    echo "请确保粘贴的内容包含 'Antigravity Version' 和 'Commit' 字段。"
+    echo "请确保粘贴的内容包含版本号和 Commit ID。"
     echo ""
-    echo "示例格式:"
-    echo "  Antigravity Version: 1.12.4"
-    echo "  Commit: da3eb231fb10e6dc27750aa465b8582265c907d9"
+    echo "支持以下两种格式:"
+    echo ""
+    echo "  格式A (旧版):"
+    echo "    Antigravity Version: 1.12.4"
+    echo "    Commit: da3eb231fb10e6dc27750aa465b8582265c907d9"
+    echo ""
+    echo "  格式B (帮助-关于-复制):"
+    echo "    版本: Antigravity"
+    echo "    提交: 1.16.5"
+    echo "    ..."
+    echo "    Electron: 1504c8cc4b34dbfbb4a97ebe954b3da2b5634516"
     exit 1
 fi
 
@@ -69,7 +92,7 @@ echo "  Commit:   ${commitid}"
 echo "------------------------------------------------"
 
 # 构建下载地址
-TARGET_DIR="${HOME}/.antigravity-server/bin/${commitid}"
+TARGET_DIR="${HOME}/.antigravity-server/bin/${version}-${commitid}"
 DOWNLOAD_URL="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${commitid}/linux-x64/Antigravity-reh.tar.gz"
 
 # 验证下载链接
