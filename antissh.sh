@@ -29,6 +29,7 @@ BACKUP_BIN=""  # 备份路径 = ${TARGET_BIN}.bak
 GRAFTCP_LOCAL_PORT=""  # graftcp-local 监听端口（默认 2233）
 GRAFTCP_PIPE_PATH=""   # graftcp-local FIFO 路径（多实例支持）
 FORCE_SYSTEM_DNS="1"   # 默认强制使用系统 DNS（可选开关）
+LAST_PORT_FILE="${INSTALL_ROOT}/last_graftcp_local_port"
 
 ################################ 安全设置 ################################
 
@@ -471,6 +472,64 @@ fi
 return 0
 }
 
+# 读取上次使用的 graftcp-local 端口
+# 返回 0 成功（输出端口号）/ 1 失败
+load_last_graftcp_port() {
+local port=""
+
+[ -f "${LAST_PORT_FILE}" ] || return 1
+
+port="$(head -n 1 "${LAST_PORT_FILE}" 2>/dev/null | tr -d '[:space:]')"
+if ! validate_port "${port}"; then
+return 1
+fi
+
+echo "${port}"
+return 0
+}
+
+# 保存本次使用的 graftcp-local 端口
+# 参数：$1 - 端口号
+save_last_graftcp_port() {
+local port="$1"
+
+if ! validate_port "${port}"; then
+return 1
+fi
+
+printf '%s\n' "${port}" > "${LAST_PORT_FILE}" || return 1
+chmod 600 "${LAST_PORT_FILE}" 2>/dev/null || true
+return 0
+}
+
+# 校验端口是否可用于 graftcp-local
+# 参数：$1 - 端口号
+# 返回：0 可用或可复用，1 不可用
+check_graftcp_port_ready() {
+local port="$1"
+
+if ! validate_port "${port}"; then
+echo "❌ 错误：端口号必须是 1-65535 的数字"
+echo ""
+return 1
+fi
+
+if check_port_occupied "${port}"; then
+if [ "${PORT_OCCUPIED_BY_GRAFTCP}" = "true" ]; then
+log "端口 ${port} 已被 graftcp-local 服务占用，将复用现有服务"
+return 0
+fi
+echo ""
+echo "❌ 端口 ${port} 已被其他服务占用"
+echo "   （提示：非 root 用户可能无法获取占用进程详情）"
+echo ""
+return 1
+fi
+
+log "端口 ${port} 可用"
+return 0
+}
+
 # 解析代理 URL 并设置全局变量 PROXY_TYPE 和 PROXY_URL
 # 输入格式：socks5://HOST:PORT 或 http://HOST:PORT
 # 兼容：socks5h:// 会按 socks5:// 处理；https:// 会按 http:// 处理
@@ -657,6 +716,9 @@ done
 # 设置全局变量 GRAFTCP_LOCAL_PORT 和 GRAFTCP_PIPE_PATH
 ask_graftcp_port() {
 local DEFAULT_PORT="2233"
+local last_port=""
+local reuse_last=""
+local port_input=""
 
 echo ""
 echo "============================================="
@@ -667,53 +729,43 @@ echo "graftcp-local 是代理转发服务，需要监听一个本地端口。"
 echo "多用户环境下，建议每个用户使用不同的端口避免冲突。"
 echo ""
 
-while true; do
+if last_port="$(load_last_graftcp_port 2>/dev/null)"; then
+echo "检测到上次使用端口：${last_port}"
+read -r -p "是否复用该端口？ [Y/n]（默认 Y）: " reuse_last
+reuse_last="${reuse_last:-Y}"
+case "${reuse_last}" in
+[Nn]*)
+echo "已选择不复用上次端口，将手动输入新端口。"
+echo ""
+;;
+*)
+if check_graftcp_port_ready "${last_port}"; then
+GRAFTCP_LOCAL_PORT="${last_port}"
+else
+echo "将改为手动输入端口。"
+echo ""
+fi
+;;
+esac
+fi
+
+while [ -z "${GRAFTCP_LOCAL_PORT}" ]; do
 read -r -p "请输入端口号（默认 ${DEFAULT_PORT}，直接回车使用默认）: " port_input
+port_input="${port_input:-${DEFAULT_PORT}}"
 
-# 直接回车使用默认端口
-if [ -z "${port_input}" ]; then
-port_input="${DEFAULT_PORT}"
-fi
-
-# 校验是否为数字
-if ! echo "${port_input}" | grep -Eq '^[0-9]+$'; then
-echo "❌ 错误：端口号必须是数字"
-echo ""
-continue
-fi
-
-# 校验端口范围
-if [ "${port_input}" -lt 1 ] || [ "${port_input}" -gt 65535 ]; then
-echo "❌ 错误：端口号必须在 1-65535 之间"
-echo ""
-continue
-fi
-
-# 检测端口是否被占用（不依赖 root 获取 PID）
-if check_port_occupied "${port_input}"; then
-# 端口被占用
-if [ "${PORT_OCCUPIED_BY_GRAFTCP}" = "true" ]; then
-log "端口 ${port_input} 已被 graftcp-local 服务占用，将复用现有服务"
+if check_graftcp_port_ready "${port_input}"; then
 GRAFTCP_LOCAL_PORT="${port_input}"
-break
 else
-echo ""
-echo "❌ 端口 ${port_input} 已被其他服务占用"
-echo "   （提示：非 root 用户可能无法获取占用进程详情）"
-echo ""
 echo "请输入其他端口号"
-continue
-fi
-else
-# 端口未被占用，可以使用
-log "端口 ${port_input} 可用"
-GRAFTCP_LOCAL_PORT="${port_input}"
-break
 fi
 done
 
 # 设置 FIFO 路径（多实例支持）
 GRAFTCP_PIPE_PATH="${INSTALL_ROOT}/graftcp-local-${GRAFTCP_LOCAL_PORT}.fifo"
+
+if ! save_last_graftcp_port "${GRAFTCP_LOCAL_PORT}"; then
+warn "写入上次端口记录失败：${LAST_PORT_FILE}"
+fi
 
 log "graftcp-local 将使用端口 ${GRAFTCP_LOCAL_PORT}，FIFO 路径：${GRAFTCP_PIPE_PATH}"
 }
@@ -1702,10 +1754,7 @@ log "已生成代理 wrapper：${TARGET_BIN}"
 # 功能：清理当前用户残留的 language_server 进程，避免复用旧进程
 cleanup_stale_language_servers() {
 local PROCESS_PATTERN="extensions/antigravity/bin/language_server_"
-local MAX_WAIT_ROUNDS=6
-local WAIT_INTERVAL_SECONDS="0.5"
-local WAIT_FALLBACK_SECONDS=1
-local current_user pid user cmd wait_count has_alive
+local current_user pid user cmd
 local stale_pids=()
 
 if ! command -v ps >/dev/null 2>&1; then
@@ -1736,28 +1785,87 @@ for pid in "${stale_pids[@]}"; do
 kill "${pid}" 2>/dev/null || warn "发送 SIGTERM 失败：PID=${pid}"
 done
 
+wait_for_processes_exit "${stale_pids[@]}"
+
+log "已清理 ${#stale_pids[@]} 个残留 language_server 进程。"
+}
+
+# 等待进程退出，超时后发送 SIGKILL
+# 参数：$@ - PID 列表
+wait_for_processes_exit() {
+local MAX_WAIT_ROUNDS=6
+local WAIT_INTERVAL_SECONDS="0.5"
+local WAIT_FALLBACK_SECONDS=1
+local pid wait_count has_alive
+local pids=("$@")
+
+[ "${#pids[@]}" -eq 0 ] && return 0
+
 wait_count=0
 while [ "${wait_count}" -lt "${MAX_WAIT_ROUNDS}" ]; do
 has_alive="false"
-for pid in "${stale_pids[@]}"; do
+for pid in "${pids[@]}"; do
 if kill -0 "${pid}" 2>/dev/null; then
 has_alive="true"
 break
 fi
 done
-[ "${has_alive}" = "false" ] && break
+[ "${has_alive}" = "false" ] && return 0
 sleep "${WAIT_INTERVAL_SECONDS}" 2>/dev/null || sleep "${WAIT_FALLBACK_SECONDS}"
 wait_count=$((wait_count + 1))
 done
 
-for pid in "${stale_pids[@]}"; do
+for pid in "${pids[@]}"; do
 if kill -0 "${pid}" 2>/dev/null; then
 warn "进程未退出，发送 SIGKILL：PID=${pid}"
 kill -9 "${pid}" 2>/dev/null || warn "发送 SIGKILL 失败：PID=${pid}"
 fi
 done
+}
 
-log "已清理 ${#stale_pids[@]} 个残留 language_server 进程。"
+# 函数名：cleanup_stale_graftcp_locals
+# 功能：清理当前用户旧的 graftcp-local 进程，仅保留当前端口对应实例
+# 参数：$1 - 需要保留的 FIFO 路径
+cleanup_stale_graftcp_locals() {
+local keep_pipe_path="$1"
+local PROCESS_PATTERN="graftcp-local"
+local PIPE_PREFIX="${INSTALL_ROOT}/graftcp-local-"
+local current_user pid user cmd
+local stale_pids=()
+
+if ! command -v ps >/dev/null 2>&1; then
+warn "未找到 ps 命令，跳过旧 graftcp-local 进程清理。"
+return 0
+fi
+
+current_user="$(whoami)"
+log "检查旧 graftcp-local 进程..."
+
+while IFS= read -r pid user cmd; do
+[ -z "${pid}" ] && continue
+[ "${user}" = "${current_user}" ] || continue
+case "${cmd}" in
+*"${PROCESS_PATTERN}"*"-pipepath "*"${PIPE_PREFIX}"*.fifo*)
+if [ -n "${keep_pipe_path}" ] && [[ "${cmd}" == *"-pipepath ${keep_pipe_path}"* ]]; then
+continue
+fi
+stale_pids+=("${pid}")
+log "发现旧 graftcp-local 进程：PID=${pid} 命令=${cmd}"
+;;
+esac
+done < <(ps -eo pid=,user=,args= 2>/dev/null)
+
+if [ "${#stale_pids[@]}" -eq 0 ]; then
+log "未发现需要清理的旧 graftcp-local 进程。"
+return 0
+fi
+
+for pid in "${stale_pids[@]}"; do
+kill "${pid}" 2>/dev/null || warn "发送 SIGTERM 失败：PID=${pid}"
+done
+
+wait_for_processes_exit "${stale_pids[@]}"
+log "已清理 ${#stale_pids[@]} 个旧 graftcp-local 进程。"
 }
 
 ################################ 测试代理连通性 ################################
@@ -2021,6 +2129,7 @@ main() {
   find_language_server
   setup_wrapper
   cleanup_stale_language_servers
+  cleanup_stale_graftcp_locals "${GRAFTCP_PIPE_PATH}"
   test_proxy
 
   echo
