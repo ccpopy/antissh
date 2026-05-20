@@ -24,12 +24,17 @@ SUDO=""        # sudo 命令
 PROXY_URL=""   # 代理地址（不含协议前缀，如 127.0.0.1:10808）
 PROXY_TYPE=""  # socks5 或 http
 GRAFTCP_DIR="${GRAFTCP_DIR:-}" # 保留用户通过环境变量传入的值，空则后续设为 ${REPO_DIR}
-TARGET_BIN=""  # language_server_* 路径
-BACKUP_BIN=""  # 备份路径 = ${TARGET_BIN}.bak
+TARGET_BINS=()  # 需配置代理的 language_server_* 路径列表（兼容多版本共存）
 GRAFTCP_LOCAL_PORT=""  # graftcp-local 监听端口（默认 2233）
 GRAFTCP_PIPE_PATH=""   # graftcp-local FIFO 路径（多实例支持）
 FORCE_SYSTEM_DNS="1"   # 默认强制使用系统 DNS（可选开关）
 LAST_PORT_FILE="${INSTALL_ROOT}/last_graftcp_local_port"
+
+# Antigravity 远程 server 根目录名（兼容多版本，按优先级排列）
+#   .antigravity-server     ：Antigravity 1.x
+#   .antigravity-ide-server ：Antigravity 2.0+（2.0 起重命名）
+# 同时存在两者时，后续按 language_server 版本号自动选择最新版本
+ANTIGRAVITY_SERVER_DIRS=(".antigravity-server" ".antigravity-ide-server")
 
 ################################ 安全设置 ################################
 
@@ -83,6 +88,9 @@ fi
 
 # 立即执行 Bash 版本检查
 check_bash_version
+
+# 预检阶段确认过需要重新备份的目标，setup_wrapper 会据此避免重复询问
+declare -A WRAPPER_REBACKUP_ALLOWED=()
 
 ################################ 兼容性 Helper 函数 ################################
 
@@ -146,6 +154,113 @@ fi
 mtime="$(get_file_mtime "${path}" 2>/dev/null || echo 0)"
 printf '%s\t%s\t%s\t%s\n' "${has_version}" "${version}" "${mtime}" "${path}"
 done | sort -t $'\t' -k1,1n -k2,2V -k3,3n | tail -n 1 | cut -f4-
+}
+
+# 函数名：select_best_per_server_dir
+# 功能：将候选路径按 server 根目录（ANTIGRAVITY_SERVER_DIRS）分组，每组各选版本
+#       最新的一个；无法归类的候选（如自定义目录）合并为一组单独选最新。
+#       用于多版本共存（1.x 与 2.0+）时为每个版本各配置一个 wrapper。
+# 参数：$@ - 候选路径列表
+# 输出：每行一个选中的路径（去重后）
+select_best_per_server_dir() {
+local -a remaining=("$@")
+[ "${#remaining[@]}" -eq 0 ] && return 0
+
+local srv_dir p best
+local -a group rest
+for srv_dir in "${ANTIGRAVITY_SERVER_DIRS[@]}"; do
+group=()
+rest=()
+for p in "${remaining[@]}"; do
+if [[ "${p}" == *"/${srv_dir}/"* ]]; then
+group+=("${p}")
+else
+rest+=("${p}")
+fi
+done
+remaining=("${rest[@]}")
+if [ "${#group[@]}" -gt 0 ]; then
+best="$(choose_best_language_server_candidate "${group[@]}")"
+[ -n "${best}" ] && echo "${best}"
+fi
+done
+
+# 未归类（自定义目录等）：合并后选最新单个，保持旧的“选最新”行为
+if [ "${#remaining[@]}" -gt 0 ]; then
+best="$(choose_best_language_server_candidate "${remaining[@]}")"
+[ -n "${best}" ] && echo "${best}"
+fi
+}
+
+# 函数名：language_server_owner_group
+# 功能：提取 language_server 所属安装根（通常是用户 HOME），用于跨用户场景避免混选
+# 参数：$1 - language_server 文件路径
+# 输出：安装根标识；未知路径输出 __custom__
+language_server_owner_group() {
+local path="$1"
+local srv_dir
+
+for srv_dir in "${ANTIGRAVITY_SERVER_DIRS[@]}"; do
+if [[ "${path}" == *"/${srv_dir}/"* ]]; then
+echo "${path%%/${srv_dir}/*}"
+return 0
+fi
+done
+
+echo "__custom__"
+}
+
+# 函数名：select_best_same_owner_group
+# 功能：在跨用户候选中先选一个最合适的安装根，再在该安装根内按 server 目录各选最新
+#       避免 root/sudo 场景把不同用户的 1.x/2.x 文件混在一起配置。
+# 参数：$@ - 候选路径列表
+# 输出：每行一个选中的路径
+select_best_same_owner_group() {
+local -a candidates=("$@")
+[ "${#candidates[@]}" -eq 0 ] && return 0
+
+declare -A grouped_paths
+declare -A selected_paths
+declare -A representative_by_group
+local -a group_keys representatives
+local p group_key representative best_representative
+
+for p in "${candidates[@]}"; do
+group_key="$(language_server_owner_group "${p}")"
+if [ -z "${grouped_paths[${group_key}]+x}" ]; then
+group_keys+=("${group_key}")
+grouped_paths["${group_key}"]="${p}"
+else
+grouped_paths["${group_key}"]+=$'\n'"${p}"
+fi
+done
+
+for group_key in "${group_keys[@]}"; do
+local -a group_candidates group_selected
+mapfile -t group_candidates <<< "${grouped_paths[${group_key}]}"
+group_selected=()
+while IFS= read -r p; do
+[ -n "${p}" ] && group_selected+=("${p}")
+done < <(select_best_per_server_dir "${group_candidates[@]}")
+
+[ "${#group_selected[@]}" -eq 0 ] && continue
+
+representative="$(choose_best_language_server_candidate "${group_selected[@]}")"
+[ -z "${representative}" ] && continue
+representatives+=("${representative}")
+representative_by_group["${group_key}"]="${representative}"
+selected_paths["${group_key}"]="$(printf '%s\n' "${group_selected[@]}")"
+done
+
+[ "${#representatives[@]}" -eq 0 ] && return 0
+
+best_representative="$(choose_best_language_server_candidate "${representatives[@]}")"
+for group_key in "${group_keys[@]}"; do
+if [ "${representative_by_group[${group_key}]:-}" = "${best_representative}" ]; then
+printf '%s\n' "${selected_paths[${group_key}]}"
+return 0
+fi
+done
 }
 
 # 函数名：format_date_from_epoch
@@ -1430,7 +1545,7 @@ log "graftcp 安装/编译完成。"
 
 # 函数名：find_language_server
 # 功能：查找 Antigravity 的 language_server_* 可执行文件
-# 设置变量：TARGET_BIN
+# 设置变量：TARGET_BINS（数组，多版本共存时含多个待配置文件）
 # 错误处理：未找到时调用 error() 退出
 find_language_server() {
 local pattern base current_user
@@ -1446,30 +1561,48 @@ log "开始查找 *${pattern}* ..."
 candidates=()
 
 # 构建搜索路径列表（按优先级排序）
+# 兼容多版本 server 目录名：.antigravity-server（1.x）/ .antigravity-ide-server（2.0+）
 local search_paths=()
+local srv_dir
 
-# 1. 优先当前用户的 .antigravity-server 目录
-search_paths+=("${HOME}/.antigravity-server")
+# 1. 优先当前用户的 server 目录
+for srv_dir in "${ANTIGRAVITY_SERVER_DIRS[@]}"; do
+search_paths+=("${HOME}/${srv_dir}")
+done
 
 # 2. 如果 HOME 不是 /root，也搜索 /root（可能以 sudo 运行）
-if [ "${HOME}" != "/root" ] && [ -d "/root/.antigravity-server" ]; then
-search_paths+=("/root/.antigravity-server")
+if [ "${HOME}" != "/root" ]; then
+for srv_dir in "${ANTIGRAVITY_SERVER_DIRS[@]}"; do
+if [ -d "/root/${srv_dir}" ]; then
+search_paths+=("/root/${srv_dir}")
+fi
+done
 fi
 
 # 3. 扫描 /home 下的其他用户目录（WSL 或多用户环境）
 if [ -d "/home" ]; then
 for user_dir in /home/*; do
-if [ -d "${user_dir}/.antigravity-server" ]; then
-# 跳过已添加的路径
-if [ "${user_dir}" != "${HOME}" ]; then
-search_paths+=("${user_dir}/.antigravity-server")
+# 跳过当前用户（已在步骤 1 处理）
+if [ "${user_dir}" = "${HOME}" ]; then
+continue
 fi
+for srv_dir in "${ANTIGRAVITY_SERVER_DIRS[@]}"; do
+if [ -d "${user_dir}/${srv_dir}" ]; then
+search_paths+=("${user_dir}/${srv_dir}")
 fi
+done
 done
 fi
 
 # 4. 用户主目录的其他位置，兜底
-if [ ! -d "${HOME}/.antigravity-server" ]; then
+local has_known_server_dir="false"
+for srv_dir in "${ANTIGRAVITY_SERVER_DIRS[@]}"; do
+if [ -d "${HOME}/${srv_dir}" ]; then
+has_known_server_dir="true"
+break
+fi
+done
+if [ "${has_known_server_dir}" = "false" ]; then
 search_paths+=("${HOME}")
 fi
 
@@ -1503,7 +1636,7 @@ echo "  - ${base}"
 done
 echo ""
 echo "请手动输入 antigravity 安装目录"
-echo "（通常是 ~/.antigravity-server 或 /home/用户名/.antigravity-server）"
+echo "（1.x 通常是 ~/.antigravity-server，2.0+ 通常是 ~/.antigravity-ide-server）"
 read -r -p "目录路径，不输入直接回车则放弃: " base
 if [ -z "${base}" ] || [ ! -d "${base}" ]; then
 error "未找到 Agent 文件，请确认 antigravity 安装路径后重试。"
@@ -1520,8 +1653,8 @@ error "仍然没有找到 language_server_* 可执行文件，请检查 antigrav
 fi
 
   if [ "${#candidates[@]}" -eq 1 ]; then
-    TARGET_BIN="${candidates[0]}"
-    log "找到 Agent 服务：${TARGET_BIN}"
+    TARGET_BINS=("${candidates[0]}")
+    log "找到 Agent 服务：${candidates[0]}"
   else
     log "检测到多个 language_server 文件（${#candidates[@]} 个）"
 
@@ -1539,15 +1672,18 @@ fi
 
     # 优先使用当前用户的文件
     if [ "${#user_candidates[@]}" -gt 0 ]; then
-      if [ "${#user_candidates[@]}" -eq 1 ]; then
-        TARGET_BIN="${user_candidates[0]}"
-        log "选择当前用户的 Agent 服务：${TARGET_BIN}"
-      else
-        # 多个当前用户的文件：优先按版本号选择，mtime 作为同版本兜底
-        log "当前用户有多个版本，按版本号优先选择最新版本..."
-        TARGET_BIN="$(choose_best_language_server_candidate "${user_candidates[@]}")"
-        log "已选择最新版本：${TARGET_BIN}"
+      # 兼容多版本共存（1.x / 2.0+）：按 server 目录分组，每组各选最新版本并全部配置
+      log "按 server 目录分组选择各自最新版本（兼容多版本共存）..."
+      TARGET_BINS=()
+      while IFS= read -r p; do
+        [ -n "${p}" ] && TARGET_BINS+=("${p}")
+      done < <(select_best_per_server_dir "${user_candidates[@]}")
+      if [ "${#TARGET_BINS[@]}" -gt 1 ]; then
+        log "检测到多个版本共存，将分别为以下 ${#TARGET_BINS[@]} 个文件配置代理："
       fi
+      for p in "${TARGET_BINS[@]}"; do
+        log "  将配置：${p}"
+      done
     else
       # 没有当前用户的文件，检查其他用户的文件是否有权限
       warn "未找到当前用户（${current_user}）的 language_server"
@@ -1568,16 +1704,27 @@ fi
           echo "  - ${p}"
         done
         echo ""
-        error "请确保 Antigravity 已安装在当前用户目录（${HOME}/.antigravity-server）"
+        error "请确保 Antigravity 已安装在当前用户目录（${HOME}/.antigravity-server 或 ${HOME}/.antigravity-ide-server）"
       fi
 
-      # 选择有权限的最新文件
-      TARGET_BIN="$(choose_best_language_server_candidate "${accessible_candidates[@]}")"
+      # 借用其他用户的文件：先选定同一个安装根，再按 server 目录各选最新。
+      # 这样 root/sudo 场景可同时兼容 1.x/2.0+，又避免混配多个用户的文件。
+      local chosen_group
+      TARGET_BINS=()
+      while IFS= read -r p; do
+        [ -n "${p}" ] && TARGET_BINS+=("${p}")
+      done < <(select_best_same_owner_group "${accessible_candidates[@]}")
 
-      warn "将使用其他用户的文件（请确认这是您期望的行为）：${TARGET_BIN}"
+      if [ "${#TARGET_BINS[@]}" -gt 0 ]; then
+        chosen_group="$(language_server_owner_group "${TARGET_BINS[0]}")"
+        warn "将使用其他安装根的文件（请确认这是您期望的行为）：${chosen_group}"
+        for p in "${TARGET_BINS[@]}"; do
+          warn "  将配置：${p}"
+        done
+      fi
     fi
 
-    if [ -z "${TARGET_BIN}" ]; then
+    if [ "${#TARGET_BINS[@]}" -eq 0 ]; then
       error "自动选择 Agent 服务失败，请检查文件权限。"
     fi
   fi
@@ -1585,34 +1732,103 @@ fi
 
 ################################ 写入 wrapper ################################
 
-# 函数名：setup_wrapper
-# 功能：备份原始 Agent 并生成代理 wrapper 脚本
-# 设置变量：BACKUP_BIN
-# 错误处理：备份或写入失败时调用 error() 退出
-setup_wrapper() {
-BACKUP_BIN="${TARGET_BIN}.bak"
-
 # Wrapper 脚本的签名标识（可能包含旧的签名）
-local WRAPPER_SIGNATURE="# 该文件由 antissh.sh 自动生成"
-local WRAPPER_SIGNATURE_OLD="# 该文件由 antigravity-set.sh 自动生成"
+WRAPPER_SIGNATURE="# 该文件由 antissh.sh 自动生成"
+WRAPPER_SIGNATURE_OLD="# 该文件由 antigravity-set.sh 自动生成"
 
-# 检测函数：判断文件是否为 wrapper 脚本
-is_wrapper_script() {
+# 检测函数：判断文件是否为 antissh 生成的 wrapper 脚本
+is_antissh_wrapper_script() {
 local file="$1"
 grep -q "${WRAPPER_SIGNATURE}" "${file}" 2>/dev/null || \
 grep -q "${WRAPPER_SIGNATURE_OLD}" "${file}" 2>/dev/null
 }
 
+# 函数名：preflight_wrapper_targets
+# 功能：在写入多个 wrapper 前统一检查权限和备份状态，避免部分写入后失败
+# 参数：$@ - 目标 language_server_* 文件路径列表
+# 错误处理：发现不可安全写入的目标时调用 error() 退出
+preflight_wrapper_targets() {
+local target backup dir tmp confirm
+
+[ "$#" -eq 0 ] && error "未找到需要配置的 Agent 服务。"
+
+log "预检 $# 个 wrapper 目标..."
+for target in "$@"; do
+backup="${target}.bak"
+dir="$(dirname "${target}")"
+
+if [ -z "${target}" ] || [ ! -f "${target}" ]; then
+error "wrapper 目标不存在或不是普通文件：${target}"
+fi
+
+if [ ! -r "${target}" ]; then
+error "wrapper 目标不可读：${target}"
+fi
+
+if [ ! -d "${dir}" ] || [ ! -w "${dir}" ]; then
+error "wrapper 目标目录不可写：${dir}"
+fi
+
+tmp="$(safe_mktemp "${target}.preflight")" || error "无法在目标目录创建临时文件：${dir}"
+rm -f "${tmp}" 2>/dev/null || error "无法清理预检临时文件：${tmp}"
+
+if [ -f "${backup}" ]; then
+if is_antissh_wrapper_script "${target}"; then
+log "预检通过：${target} 已是 wrapper，将更新配置"
+else
+warn "检测到备份与当前文件不一致：${backup} 存在，但 ${target} 不是 wrapper 脚本"
+echo ""
+echo "可能的原因："
+echo "  1. 之前手动恢复过原始文件"
+echo "  2. Antigravity 更新后覆盖了 wrapper"
+echo ""
+echo "当前文件信息："
+file "${target}" 2>/dev/null || echo "  无法识别文件类型"
+echo ""
+echo "备份文件信息："
+file "${backup}" 2>/dev/null || echo "  无法识别文件类型"
+echo ""
+read -r -p "是否将当前文件作为新的原始文件备份？ [y/N]: " confirm
+case "${confirm}" in
+[Yy]*)
+WRAPPER_REBACKUP_ALLOWED["${target}"]=1
+;;
+*)
+echo "操作取消。如需继续，请先手动处理这两个文件："
+echo "  ${target}"
+echo "  ${backup}"
+exit 1
+;;
+esac
+fi
+else
+if is_antissh_wrapper_script "${target}"; then
+error "异常：${target} 是 wrapper 脚本，但备份文件 ${backup} 不存在！请手动检查。"
+fi
+log "预检通过：${target} 将首次生成 wrapper"
+fi
+done
+}
+
+# 函数名：setup_wrapper
+# 功能：备份指定的原始 Agent 并生成代理 wrapper 脚本
+# 参数：$1 - 目标 language_server_* 文件路径
+# 错误处理：备份或写入失败时调用 error() 退出
+setup_wrapper() {
+local TARGET_BIN="$1"
+local BACKUP_BIN="${TARGET_BIN}.bak"
+
 if [ -f "${BACKUP_BIN}" ]; then
 # .bak 文件存在，说明之前执行过脚本
 # 需要验证当前的 TARGET_BIN 是否为 wrapper 脚本
-if is_wrapper_script "${TARGET_BIN}"; then
+if is_antissh_wrapper_script "${TARGET_BIN}"; then
 # 当前文件是 wrapper 脚本，直接更新即可
 log "检测到已有备份文件：${BACKUP_BIN}"
 log "当前文件已是 wrapper 脚本，将更新代理配置"
 else
 # .bak 已存在但当前文件不是 wrapper：备份与当前可执行文件已不再对应
 # 常见原因：手动恢复原始文件 / 升级覆盖 wrapper / 文件被替换
+if [ "${WRAPPER_REBACKUP_ALLOWED[${TARGET_BIN}]:-}" != "1" ]; then
 warn "检测到备份与当前文件不一致：${BACKUP_BIN} 存在，但 ${TARGET_BIN} 不是 wrapper 脚本"
 echo ""
 echo "可能的原因："
@@ -1628,9 +1844,7 @@ echo ""
 read -r -p "是否将当前文件作为新的原始文件备份？ [y/N]: " confirm
 case "${confirm}" in
 [Yy]*)
-log "将当前文件备份为新的 .bak 文件"
-mv "${BACKUP_BIN}" "${BACKUP_BIN}.old" || true
-mv "${TARGET_BIN}" "${BACKUP_BIN}" || error "备份失败"
+WRAPPER_REBACKUP_ALLOWED["${TARGET_BIN}"]=1
 ;;
 *)
 echo "操作取消。如需继续，请先手动处理这两个文件："
@@ -1639,11 +1853,25 @@ echo "  ${BACKUP_BIN}"
 exit 1
 ;;
 esac
+else
+log "预检已确认重新备份当前文件：${TARGET_BIN}"
+fi
+log "将当前文件备份为新的 .bak 文件"
+local backup_old
+backup_old="${BACKUP_BIN}.old.$(date +%Y%m%d%H%M%S)"
+if [ -e "${backup_old}" ]; then
+backup_old="${BACKUP_BIN}.old.$$"
+fi
+mv "${BACKUP_BIN}" "${backup_old}" || error "备份轮转失败：无法移动 ${BACKUP_BIN} -> ${backup_old}"
+if ! mv "${TARGET_BIN}" "${BACKUP_BIN}"; then
+mv "${backup_old}" "${BACKUP_BIN}" 2>/dev/null || true
+error "备份失败：无法移动 ${TARGET_BIN} -> ${BACKUP_BIN}"
+fi
 fi
 else
 # .bak 文件不存在
 # .bak 不存在但当前文件是 wrapper：说明备份文件丢失或被清理
-if is_wrapper_script "${TARGET_BIN}"; then
+if is_antissh_wrapper_script "${TARGET_BIN}"; then
 error "异常：${TARGET_BIN} 是 wrapper 脚本，但备份文件 ${BACKUP_BIN} 不存在！请手动检查。"
 fi
 
@@ -2110,6 +2338,7 @@ fi
 # 函数名：main
 # 功能：脚本主入口，协调所有配置步骤
 main() {
+  local target
   echo "==== Antigravity + graftcp 一键配置脚本 ===="
   echo "支持系统：Linux"
   echo "安装日志：${INSTALL_LOG}"
@@ -2127,7 +2356,10 @@ main() {
   ensure_dependencies
   install_graftcp
   find_language_server
-  setup_wrapper
+  preflight_wrapper_targets "${TARGET_BINS[@]}"
+  for target in "${TARGET_BINS[@]}"; do
+    setup_wrapper "${target}"
+  done
   cleanup_stale_language_servers
   cleanup_stale_graftcp_locals "${GRAFTCP_PIPE_PATH}"
   test_proxy
@@ -2135,24 +2367,33 @@ main() {
   echo
   echo "=================== 配置完成 🎉 ==================="
   echo "graftcp 安装目录： ${GRAFTCP_DIR}"
-  echo "Agent 备份文件：   ${BACKUP_BIN}"
   echo "当前代理：         ${PROXY_TYPE}://${PROXY_URL}"
   echo "graftcp-local 端口: ${GRAFTCP_LOCAL_PORT}"
   echo
+  if [ "${#TARGET_BINS[@]}" -gt 1 ]; then
+    echo "已为以下 ${#TARGET_BINS[@]} 个版本分别配置代理 wrapper（多版本共存）："
+  else
+    echo "已配置代理 wrapper："
+  fi
+  for target in "${TARGET_BINS[@]}"; do
+    echo "  wrapper： ${target}"
+    echo "  备份：    ${target}.bak"
+  done
+  echo
   echo "如需修改代理："
   echo "  1. 直接重新运行本脚本，按提示输入新的代理地址即可。"
-  echo "  2. 或手动编辑 wrapper 文件："
-  echo "       ${TARGET_BIN}"
+  echo "  2. 或手动编辑上面列出的 wrapper 文件，"
   echo "     修改其中的 PROXY_URL 和 PROXY_TYPE 后重启 antigravity。"
   echo
   echo "如需切换 DNS 策略："
   echo "  1. 重新运行本脚本，在“DNS 解析策略”中选择。"
-  echo "  2. 或手动编辑 wrapper 文件："
-  echo "       ${TARGET_BIN}"
+  echo "  2. 或手动编辑上面列出的 wrapper 文件，"
   echo "     将 ANTISSH_FORCE_SYSTEM_DNS 设置为 1（强制）或 0（不强制）。"
   echo
-  echo "如需完全恢复原始行为："
-  echo "  mv \"${BACKUP_BIN}\" \"${TARGET_BIN}\""
+  echo "如需完全恢复原始行为（对每个文件分别执行）："
+  for target in "${TARGET_BINS[@]}"; do
+    echo "  mv \"${target}.bak\" \"${target}\""
+  done
   echo
   echo "安装/编译日志位于：${INSTALL_LOG}"
   echo

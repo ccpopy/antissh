@@ -91,23 +91,77 @@ echo "  版本号:   ${version}"
 echo "  Commit:   ${commitid}"
 echo "------------------------------------------------"
 
-# 构建下载地址
-TARGET_DIR="${HOME}/.antigravity-server/bin/${version}-${commitid}"
-DOWNLOAD_URL="https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${commitid}/linux-x64/Antigravity-reh.tar.gz"
+# 构建安装目录和下载地址
+# 根据版本选择 server 根目录名（与 IDE 客户端在远程创建的目录保持一致）
+#   Antigravity 1.x  → .antigravity-server
+#   Antigravity 2.0+ → .antigravity-ide-server（2.0 起重命名）
+version_major="${version%%.*}"
+case "$version_major" in
+    ''|*[!0-9]*) version_major=0 ;;
+esac
+if [ "$version_major" -ge 2 ]; then
+    SERVER_DIR_NAME=".antigravity-ide-server"
+    PRIMARY_ARCHIVE_URL_NAME="Antigravity%20IDE-reh.tar.gz"
+    FALLBACK_ARCHIVE_URL_NAME="Antigravity-reh.tar.gz"
+else
+    SERVER_DIR_NAME=".antigravity-server"
+    PRIMARY_ARCHIVE_URL_NAME="Antigravity-reh.tar.gz"
+    FALLBACK_ARCHIVE_URL_NAME="Antigravity%20IDE-reh.tar.gz"
+fi
+SERVER_ROOT="${HOME}/${SERVER_DIR_NAME}"
+TARGET_DIR="${SERVER_ROOT}/bin/${version}-${commitid}"
+ARCHIVE_FILE="Antigravity-reh.tar.gz"
+
+# 2.0+ 的安装包文件名从 Antigravity-reh.tar.gz 改为 Antigravity IDE-reh.tar.gz。
+# URL 中空格必须编码为 %20；同时保留旧文件名和旧路径作为兜底，兼容 1.x/灰度版本/CDN 差异。
+DOWNLOAD_URLS=(
+    "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${commitid}/linux-x64/${PRIMARY_ARCHIVE_URL_NAME}"
+    "https://redirector.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${commitid}/linux-x64/${PRIMARY_ARCHIVE_URL_NAME}"
+    "https://edgedl.me.gvt1.com/edgedl/antigravity/stable/${version}-${commitid}/linux-x64/${PRIMARY_ARCHIVE_URL_NAME}"
+    "https://redirector.gvt1.com/edgedl/antigravity/stable/${version}-${commitid}/linux-x64/${PRIMARY_ARCHIVE_URL_NAME}"
+    "https://edgedl.me.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${commitid}/linux-x64/${FALLBACK_ARCHIVE_URL_NAME}"
+    "https://redirector.gvt1.com/edgedl/release2/j0qc3/antigravity/stable/${version}-${commitid}/linux-x64/${FALLBACK_ARCHIVE_URL_NAME}"
+)
+
+if [ ! -d "$SERVER_ROOT" ]; then
+    echo "正在创建 server 根目录: $SERVER_ROOT"
+    mkdir -p "$SERVER_ROOT" || { echo "无法创建 server 根目录"; exit 1; }
+fi
 
 # 验证下载链接
 echo ""
 echo "正在验证下载链接..."
-HTTP_CODE=$(curl -sI "$DOWNLOAD_URL" -o /dev/null -w "%{http_code}" --connect-timeout 10)
+DOWNLOAD_URL=""
+for url in "${DOWNLOAD_URLS[@]}"; do
+    echo "  检查: ${url}"
+    if command -v curl >/dev/null 2>&1; then
+        HTTP_CODE=$(curl -sIL "$url" -o /dev/null -w "%{http_code}" --connect-timeout 10 --max-time 20)
+        if [ "$HTTP_CODE" = "200" ]; then
+            DOWNLOAD_URL="$url"
+            break
+        fi
+        echo "    HTTP ${HTTP_CODE}"
+    elif command -v wget >/dev/null 2>&1; then
+        if wget -q --spider --timeout=10 "$url"; then
+            DOWNLOAD_URL="$url"
+            break
+        fi
+        echo "    验证失败"
+    else
+        echo "[错误] 未找到 wget 或 curl，请先安装其中一个。"
+        echo "  Ubuntu/Debian: sudo apt-get install wget"
+        echo "  CentOS/RHEL:   sudo yum install wget"
+        exit 1
+    fi
+done
 
-if [ "$HTTP_CODE" != "200" ]; then
-    echo "[错误] 下载链接无效 (HTTP ${HTTP_CODE})"
-    echo "可能原因: 版本号或 Commit ID 不正确"
-    echo "下载链接: ${DOWNLOAD_URL}"
-    exit 1
+if [ -n "$DOWNLOAD_URL" ]; then
+    echo "[✓] 下载链接验证通过"
+    echo "命中的下载链接: ${DOWNLOAD_URL}"
+else
+    echo "⚠️ 未能通过 HEAD/spider 验证下载链接，将继续尝试实际下载。"
+    echo "   如果全部失败，请重点检查版本号、Commit ID 或 CDN 是否可访问。"
 fi
-
-echo "[✓] 下载链接验证通过"
 echo "开始安装"
 
 
@@ -125,43 +179,62 @@ cd "$TARGET_DIR" || { echo "无法进入目录"; exit 1; }
 # 2. 下载组件包（支持 wget 和 curl 降级）
 echo "正在从 Google 镜像源下载组件..."
 download_success=0
-
-if command -v wget >/dev/null 2>&1; then
-    # 使用 wget 下载
-    if wget -q --show-progress "$DOWNLOAD_URL" -O Antigravity-reh.tar.gz; then
-        download_success=1
-    fi
-elif command -v curl >/dev/null 2>&1; then
-    # 降级到 curl 下载
-    echo "wget 不可用，使用 curl 下载..."
-    if curl -# -L "$DOWNLOAD_URL" -o Antigravity-reh.tar.gz; then
-        download_success=1
-    fi
-else
-    echo "[错误] 未找到 wget 或 curl，请先安装其中一个。"
-    echo "  Ubuntu/Debian: sudo apt-get install wget"
-    echo "  CentOS/RHEL:   sudo yum install wget"
-    exit 1
+download_candidates=()
+if [ -n "$DOWNLOAD_URL" ]; then
+    download_candidates+=("$DOWNLOAD_URL")
 fi
+for url in "${DOWNLOAD_URLS[@]}"; do
+    [ "$url" = "$DOWNLOAD_URL" ] && continue
+    download_candidates+=("$url")
+done
+
+for url in "${download_candidates[@]}"; do
+    echo "尝试下载: ${url}"
+    rm -f "$ARCHIVE_FILE"
+
+    if command -v wget >/dev/null 2>&1; then
+        if wget -q --show-progress "$url" -O "$ARCHIVE_FILE"; then
+            download_success=1
+            DOWNLOAD_URL="$url"
+            break
+        fi
+    elif command -v curl >/dev/null 2>&1; then
+        echo "wget 不可用，使用 curl 下载..."
+        if curl -# -L "$url" -o "$ARCHIVE_FILE"; then
+            download_success=1
+            DOWNLOAD_URL="$url"
+            break
+        fi
+    else
+        echo "[错误] 未找到 wget 或 curl，请先安装其中一个。"
+        echo "  Ubuntu/Debian: sudo apt-get install wget"
+        echo "  CentOS/RHEL:   sudo yum install wget"
+        exit 1
+    fi
+
+    echo "下载失败，尝试下一个 URL..."
+done
 
 # 检查下载是否成功
 if [ "$download_success" -ne 1 ]; then
-    echo "错误：下载失败！请检查网络连接。"
+    echo "错误：下载失败！请检查网络连接、版本号和 Commit ID。"
     exit 1
 fi
 
 # 3. 解压并清理
 echo "正在解压组件..."
-tar -xzf Antigravity-reh.tar.gz --strip-components=1
+tar -xzf "$ARCHIVE_FILE" --strip-components=1
 
 if [ $? -eq 0 ]; then
     touch 0  # 创建成功标记文件
-    rm Antigravity-reh.tar.gz
+    rm "$ARCHIVE_FILE"
     echo ""
     echo "================================================"
     echo "  恭喜！安装已完成。"
     echo "  版本: ${version}"
     echo "  Commit: ${commitid}"
+    echo "  目录: ${TARGET_DIR}"
+    echo "  下载源: ${DOWNLOAD_URL}"
     echo ""
     echo "  请在本地 Antigravity 客户端重新连接 SSH。"
     echo "================================================"
