@@ -100,6 +100,7 @@ flowchart TD
   - `3` 两者都配置
 - 输入代理地址，格式如下：
   - SOCKS5: `socks5://127.0.0.1:10808`
+  - 带用户名密码的 SOCKS5: `socks5://user:pass@127.0.0.1:10808`
   - HTTP: `http://127.0.0.1:10808`
 - 选择 DNS 解析策略（默认强制系统 DNS）
 - 自动安装依赖和编译 graftcp
@@ -115,6 +116,14 @@ flowchart TD
 ### 5. 修改代理
 
 直接重新运行脚本即可更新代理设置。
+
+如果需要使用带用户名密码的 SOCKS5 代理，请按 URL 标准格式输入：
+
+```bash
+socks5://user:pass@127.0.0.1:10808
+```
+
+脚本会把用户名和密码写入 wrapper，并在调用 graftcp v0.8+ 单二进制时传入 `--socks5_username` / `--socks5_password`。
 
 ### 6. 恢复原始状态
 
