@@ -23,6 +23,8 @@ PM=""          # 包管理器
 SUDO=""        # sudo 命令
 PROXY_URL=""   # 代理地址（不含协议前缀，如 127.0.0.1:10808）
 PROXY_TYPE=""  # socks5 或 http
+PROXY_USERNAME="" # SOCKS5 用户名（可选）
+PROXY_PASSWORD="" # SOCKS5 密码（可选）
 GRAFTCP_DIR="${GRAFTCP_DIR:-}" # 保留用户通过环境变量传入的值，空则后续设为 ${REPO_DIR}
 GRAFTCP_RUNTIME_MODE="" # merged=v0.8+ 单二进制；legacy=v0.7 graftcp + graftcp-local
 GRAFTCP_BIN=""          # 实际用于执行命令的 graftcp 可执行文件
@@ -687,8 +689,8 @@ log "端口 ${port} 可用"
 return 0
 }
 
-# 解析代理 URL 并设置全局变量 PROXY_TYPE 和 PROXY_URL
-# 输入格式：socks5://HOST:PORT 或 http://HOST:PORT
+# 解析代理 URL 并设置全局变量 PROXY_TYPE / PROXY_URL / PROXY_USERNAME / PROXY_PASSWORD
+# 输入格式：socks5://HOST:PORT、socks5://USER:PASS@HOST:PORT 或 http://HOST:PORT
 # 兼容：socks5h:// 会按 socks5:// 处理；https:// 会按 http:// 处理
 # 返回 0 表示解析成功，1 表示格式错误
 # 错误信息存储在 PARSE_ERROR 变量中
@@ -696,9 +698,11 @@ PARSE_ERROR=""
 
 parse_proxy_url() {
 local input="$1"
-local scheme host port host_port
+local scheme host port host_port auth_part
 
 PARSE_ERROR=""
+PROXY_USERNAME=""
+PROXY_PASSWORD=""
 
 # 检查是否包含协议前缀
 if ! echo "${input}" | grep -Eq '^(socks5h?|https?|http)://'; then
@@ -709,6 +713,8 @@ fi
 # 提取协议
 scheme="${input%%://*}"
 host_port="${input#*://}"
+# 移除路径部分（如 /）
+host_port="${host_port%%/*}"
 
 # 校验协议类型
 case "${scheme}" in
@@ -740,18 +746,35 @@ return 1
 ;;
 esac
 
+# 提取可选认证信息：socks5://USER:PASS@HOST:PORT
+if echo "${host_port}" | grep -q '@'; then
+auth_part="${host_port%%@*}"
+host_port="${host_port#*@}"
+if [ "${PROXY_TYPE}" != "socks5" ]; then
+PARSE_ERROR="当前仅支持 SOCKS5 代理用户名密码：socks5://USER:PASS@HOST:PORT"
+return 1
+fi
+if ! echo "${auth_part}" | grep -q ':'; then
+PARSE_ERROR="SOCKS5 认证信息格式错误，正确格式：socks5://USER:PASS@HOST:PORT"
+return 1
+fi
+PROXY_USERNAME="${auth_part%%:*}"
+PROXY_PASSWORD="${auth_part#*:}"
+if [ -z "${PROXY_USERNAME}" ] || [ -z "${PROXY_PASSWORD}" ]; then
+PARSE_ERROR="SOCKS5 用户名和密码不能为空"
+return 1
+fi
+fi
+
 # 检查是否包含端口
 if ! echo "${host_port}" | grep -q ':'; then
-PARSE_ERROR="代理地址缺少端口号，正确格式：${scheme}://IP:PORT"
+PARSE_ERROR="代理地址缺少端口号，正确格式：${scheme}://IP:PORT 或 socks5://USER:PASS@IP:PORT"
 return 1
 fi
 
 # 提取 IP 和端口
 host="${host_port%%:*}"
 port="${host_port##*:}"
-
-# 移除端口后可能的路径（如 /）
-port="${port%%/*}"
 
 # 校验 IP 地址或主机名
 if ! validate_ip "${host}"; then
@@ -822,6 +845,9 @@ echo "检测到环境变量 ${ENV_PROXY_SOURCE} 中已配置代理：${ENV_PROXY
 # 尝试解析环境变量中的代理
 if parse_proxy_url "${ENV_PROXY_RAW}"; then
 echo "解析结果：类型=${PROXY_TYPE}，地址=${PROXY_URL}"
+if [ -n "${PROXY_USERNAME}" ]; then
+echo "检测到 SOCKS5 用户名密码认证：用户名=${PROXY_USERNAME}，密码=<已隐藏>"
+fi
 read -r -p "是否直接使用该代理？ [Y/n] （默认 Y）: " use_env
 use_env="${use_env:-Y}"
 case "${use_env}" in
@@ -843,6 +869,7 @@ fi
 echo
 echo "请输入代理地址，格式示例："
 echo "  SOCKS5: socks5://127.0.0.1:10808"
+echo "  SOCKS5 + 用户名密码: socks5://user:pass@127.0.0.1:10808"
 echo "  HTTP:   http://127.0.0.1:10809"
 echo ""
 echo "直接回车 = 不设置代理，退出脚本"
@@ -977,7 +1004,11 @@ local proxy_full_url=""
 
 # 构造完整代理 URL
 if [ "${PROXY_TYPE}" = "socks5" ]; then
+if [ -n "${PROXY_USERNAME}" ]; then
+proxy_full_url="socks5://${PROXY_USERNAME}:${PROXY_PASSWORD}@${PROXY_URL}"
+else
 proxy_full_url="socks5://${PROXY_URL}"
+fi
 else
 proxy_full_url="http://${PROXY_URL}"
 fi
@@ -989,8 +1020,12 @@ log "正在快速探测代理可用性...（连接超时 3 秒，总超时 5 秒
 local probe_result=1
 
 if [ "${PROXY_TYPE}" = "socks5" ]; then
-# 对于 socks5 代理，使用 --socks5 选项
-if curl -s --socks5 "${PROXY_URL}" --connect-timeout 3 --max-time 5 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null | grep -qE '^(200|301|302)$'; then
+# 对于 socks5 代理，使用 --socks5 选项；如配置了用户名密码则追加 --proxy-user
+local curl_socks5_args=(--socks5 "${PROXY_URL}")
+if [ -n "${PROXY_USERNAME}" ]; then
+curl_socks5_args+=(--proxy-user "${PROXY_USERNAME}:${PROXY_PASSWORD}")
+fi
+if curl -s "${curl_socks5_args[@]}" --connect-timeout 3 --max-time 5 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null | grep -qE '^(200|301|302)$'; then
 probe_result=0
 fi
 else
@@ -2071,6 +2106,11 @@ fi
 
 # 生成 wrapper 脚本（先写临时文件，再 mv 覆盖，尽量保证写入原子性）
 local wrapper_tmp
+local proxy_url_q proxy_type_q proxy_username_q proxy_password_q
+printf -v proxy_url_q '%q' "${PROXY_URL}"
+printf -v proxy_type_q '%q' "${PROXY_TYPE}"
+printf -v proxy_username_q '%q' "${PROXY_USERNAME}"
+printf -v proxy_password_q '%q' "${PROXY_PASSWORD}"
 wrapper_tmp=$(safe_mktemp "${TARGET_BIN}.tmp") || error "无法创建临时文件"
 # 注册临时文件到清理列表，确保脚本异常退出时也能清理
 TEMP_FILES_TO_CLEANUP+=("${wrapper_tmp}")
@@ -2086,8 +2126,10 @@ GRAFTCP_DIR="${GRAFTCP_DIR}"
 GRAFTCP_RUNTIME_MODE="${GRAFTCP_RUNTIME_MODE}"
 GRAFTCP_BIN="${GRAFTCP_BIN}"
 GRAFTCP_LOCAL_BIN="${GRAFTCP_LOCAL_BIN}"
-PROXY_URL="${PROXY_URL}"
-PROXY_TYPE="${PROXY_TYPE}"
+PROXY_URL=${proxy_url_q}
+PROXY_TYPE=${proxy_type_q}
+PROXY_USERNAME=${proxy_username_q}
+PROXY_PASSWORD=${proxy_password_q}
 GRAFTCP_LOCAL_PORT="${GRAFTCP_LOCAL_PORT}"
 GRAFTCP_PIPE_PATH="${GRAFTCP_PIPE_PATH}"
 ANTISSH_FORCE_SYSTEM_DNS="\${ANTISSH_FORCE_SYSTEM_DNS:-${FORCE_SYSTEM_DNS}}"
@@ -2151,7 +2193,14 @@ if [ "\$GRAFTCP_RUNTIME_MODE" = "merged" ]; then
   if [ "\$PROXY_TYPE" = "http" ]; then
     exec "\$GRAFTCP_BIN" --http_proxy="\$PROXY_URL" --select_proxy_mode=only_http_proxy env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy "\$0.bak" "\$@"
   else
-    exec "\$GRAFTCP_BIN" --socks5="\$PROXY_URL" --select_proxy_mode=only_socks5 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy "\$0.bak" "\$@"
+    PROXY_ARGS=(--socks5="\$PROXY_URL" --select_proxy_mode=only_socks5)
+    if [ -n "\${PROXY_USERNAME:-}" ]; then
+      PROXY_ARGS+=(--socks5_username="\$PROXY_USERNAME")
+    fi
+    if [ -n "\${PROXY_PASSWORD:-}" ]; then
+      PROXY_ARGS+=(--socks5_password="\$PROXY_PASSWORD")
+    fi
+    exec "\$GRAFTCP_BIN" "\${PROXY_ARGS[@]}" env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy "\$0.bak" "\$@"
   fi
 else
   exec "\$GRAFTCP_BIN" -p "\$GRAFTCP_LOCAL_PORT" -f "\$GRAFTCP_PIPE_PATH" env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy "\$0.bak" "\$@"
@@ -2327,7 +2376,14 @@ fi
 if [ "${PROXY_TYPE}" = "http" ]; then
 http_code=$("${GRAFTCP_BIN}" --http_proxy="${PROXY_URL}" --select_proxy_mode=only_http_proxy env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
 else
-http_code=$("${GRAFTCP_BIN}" --socks5="${PROXY_URL}" --select_proxy_mode=only_socks5 env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
+local proxy_args=(--socks5="${PROXY_URL}" --select_proxy_mode=only_socks5)
+if [ -n "${PROXY_USERNAME}" ]; then
+proxy_args+=(--socks5_username="${PROXY_USERNAME}")
+fi
+if [ -n "${PROXY_PASSWORD}" ]; then
+proxy_args+=(--socks5_password="${PROXY_PASSWORD}")
+fi
+http_code=$("${GRAFTCP_BIN}" "${proxy_args[@]}" env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy curl -s --connect-timeout 10 --max-time 15 -o /dev/null -w "%{http_code}" "https://www.google.com" 2>/dev/null || echo "000")
 fi
 
 if [ "${http_code}" = "200" ] || [ "${http_code}" = "301" ] || [ "${http_code}" = "302" ]; then
@@ -2697,7 +2753,7 @@ main() {
   echo "如需修改代理："
   echo "  1. 直接重新运行本脚本，按提示输入新的代理地址即可。"
   echo "  2. 或手动编辑上面列出的 wrapper 文件，"
-  echo "     修改其中的 PROXY_URL 和 PROXY_TYPE 后重启 antigravity。"
+  echo "     修改其中的 PROXY_URL / PROXY_TYPE / PROXY_USERNAME / PROXY_PASSWORD 后重启 antigravity。"
   echo
   echo "如需切换 DNS 策略："
   echo "  1. 重新运行本脚本，在“DNS 解析策略”中选择。"
