@@ -2,12 +2,14 @@
 
 为 反重力 Agent 配置代理，解决网络连接问题。
 
-> 支持两种配置对象（脚本启动时可选择）：
+> `antissh.sh` 支持两种配置对象（脚本启动时可选择）：
 >
 > - **Antigravity IDE 远程 Agent**（`language_server`）
 > - **Antigravity CLI**（`agy` 命令行，默认安装在 `~/.local/bin/agy`）
 >
 > 两者都是与 Antigravity 共用同一 Agent 引擎的 Go 程序，脚本统一通过 graftcp wrapper 代理其出站流量。
+
+Antigravity IDE 2.6.0 的 Linux/WSL 远程服务包改用 `~/.gemini/bin/agy --hub` 启动 Agent。该路径不同于 CLI 的 `~/.local/bin/agy`。针对这个后端，仓库另提供实验性的 [`antiagy.sh`](./antiagy.sh)；在真实环境获得反馈之前，`antissh.sh` 仍保持原有用途和入口。
 
 ## 系统支持
 
@@ -16,6 +18,32 @@
 | **Linux**   | 支持     | 使用 graftcp 自动代理（脚本为 Bash，需 Bash >= 4）                            |
 | **macOS**   | 不支持   | graftcp 依赖 Linux 的 `ptrace`，推荐使用 Proxifier 或 TUN 模式                |
 | **Windows** | 不支持   | 推荐使用 Proxifier 或 TUN 模式 或 DLL 注入（见下文）；WSL 可按 Linux 方式使用 |
+
+## 实验性：IDE 2.6.0 的 Linux/WSL `agy --hub`
+
+`antiagy.sh` 专门检查并代理 IDE 管理的 `~/.gemini/bin/agy`，不会修改 CLI 的 `~/.local/bin/agy`，也不会改动 `antissh.sh`。这是待真实使用反馈验证的方案，先使用 `check` 检查目标文件和代理连通性，再执行 `install`。
+
+前提：Linux/WSL 中已通过 IDE 启动过 Agent，使 `~/.gemini/bin/agy` 存在；安装 `curl` 和 graftcp v0.8+。若尚未编译 graftcp，可运行：
+
+```bash
+git clone https://github.com/hmgle/graftcp.git ~/.graftcp-antigravity/graftcp
+make -C ~/.graftcp-antigravity/graftcp
+```
+
+将本仓库的 `antiagy.sh` 放到 Linux/WSL 后，执行：
+
+```bash
+bash antiagy.sh check socks5://127.0.0.1:10808
+# 关闭对应的 IDE 远程窗口后，再安装 wrapper
+bash antiagy.sh install socks5://127.0.0.1:10808
+bash antiagy.sh status
+```
+
+HTTP 代理可写为 `http://127.0.0.1:8080`；代理地址需能从 **Linux/WSL 内部** 访问。WSL 非 Mirrored 网络模式下，Windows 宿主机代理的地址可能不是 `127.0.0.1`，可参考下文的 WSL 网络配置。
+
+脚本会在修改前检查原始文件为可执行的 Linux ELF、读取版本、测试通过代理访问 Google 认证端点，并在安装后复核版本；原始二进制保存在 `~/.gemini/bin/agy.antiagy-original`。需要恢复时，关闭 IDE 远程窗口并执行 `bash antiagy.sh restore`。IDE 更新若覆盖 wrapper，`status` 会显示 `updated`，重新执行 `install` 即可保留旧备份并代理新版本。脚本不会停止运行中的 `agy --hub`。
+
+此方案尚未在真实远程 IDE 会话中验证；如果 `check` 或安装后的 Agent 启动失败，请带上 IDE 版本、Linux/WSL 类型、`antiagy.sh status` 输出和脱敏后的 Antigravity 日志反馈。不要在日志中公开 `--csrf_token` 等令牌。
 
 ## Linux 使用方法
 
@@ -282,7 +310,7 @@ http://127.0.0.1:10808
    - Action 选择刚添加的代理
 
 > [!TIP]
-> 上面的 `agy` / `agy.exe` 对应 Antigravity CLI（命令行）。仅使用 IDE 可忽略；仅使用 CLI 时只需添加 `agy`/`agy.exe` 即可。
+> Windows 的 IDE 2.6.0 后台也可能启动 `%USERPROFILE%\.gemini\bin\agy.exe`；使用 Proxifier 时请按实际进程包含 `agy.exe`。这是 Windows 进程名；Linux/WSL 的实验脚本处理的是没有 `.exe` 后缀的 `~/.gemini/bin/agy`。
 
 ### 推荐方案 2：通过 DLL 注入（仅 Windows 推荐）
 
