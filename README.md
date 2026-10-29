@@ -1,15 +1,16 @@
 # 反重力代理配置工具
 
-为 反重力 Agent 配置代理，解决网络连接问题。
+为反重力 Agent 配置代理，解决网络连接问题。
 
-> `antissh.sh` 支持两种配置对象（脚本启动时可选择）：
->
-> - **Antigravity IDE 远程 Agent**（`language_server`）
-> - **Antigravity CLI**（`agy` 命令行，默认安装在 `~/.local/bin/agy`）
->
-> 两者都是与 Antigravity 共用同一 Agent 引擎的 Go 程序，脚本统一通过 graftcp wrapper 代理其出站流量。
+## 选择配置工具
 
-Antigravity IDE 2.6.0 的 Linux/WSL 远程服务包改用 `~/.gemini/bin/agy --hub` 启动 Agent。该路径不同于 CLI 的 `~/.local/bin/agy`。针对这个后端，仓库另提供实验性的 [`antiagy.sh`](./antiagy.sh)；在真实环境获得反馈之前，`antissh.sh` 仍保持原有用途和入口。
+| Linux/WSL 中的目标 | 脚本 | 状态 |
+| --- | --- | --- |
+| IDE 远程 Agent（`language_server_linux_*`） | [`antissh.sh`](./antissh.sh) | 原有方案 |
+| Antigravity CLI（通常为 `~/.local/bin/agy`） | [`antissh.sh`](./antissh.sh) | 原有方案 |
+| IDE 2.6.0 远程 Agent（`~/.gemini/bin/agy --hub`） | [`antiagy.sh`](./antiagy.sh) | 实验性，待真实使用反馈 |
+
+两个脚本都通过 graftcp wrapper 代理出站流量。`antiagy.sh` 处理的是 Linux/WSL 中没有 `.exe` 后缀的 `agy`，与 Windows 的 `agy.exe` 不同；在有真实使用反馈前，保留 `antissh.sh` 原有入口和用途。
 
 ## 系统支持
 
@@ -30,9 +31,10 @@ git clone https://github.com/hmgle/graftcp.git ~/.graftcp-antigravity/graftcp
 make -C ~/.graftcp-antigravity/graftcp
 ```
 
-将本仓库的 `antiagy.sh` 放到 Linux/WSL 后，执行：
+在 Linux/WSL 中下载本仓库根目录的脚本并执行：
 
 ```bash
+curl -fLO https://raw.githubusercontent.com/ccpopy/antissh/main/antiagy.sh
 bash antiagy.sh check socks5://127.0.0.1:10808
 # 关闭对应的 IDE 远程窗口后，再安装 wrapper
 bash antiagy.sh install socks5://127.0.0.1:10808
@@ -45,7 +47,7 @@ HTTP 代理可写为 `http://127.0.0.1:8080`；代理地址需能从 **Linux/WSL
 
 此方案尚未在真实远程 IDE 会话中验证；如果 `check` 或安装后的 Agent 启动失败，请带上 IDE 版本、Linux/WSL 类型、`antiagy.sh status` 输出和脱敏后的 Antigravity 日志反馈。不要在日志中公开 `--csrf_token` 等令牌。
 
-## Linux 使用方法
+## Linux 使用方法（antissh.sh）
 
 ### 1. 下载脚本
 
