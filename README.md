@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | IDE 远程 Agent（`language_server_linux_*`） | [`antissh.sh`](./antissh.sh) | 原有方案 |
 | Antigravity CLI（通常为 `~/.local/bin/agy`） | [`antissh.sh`](./antissh.sh) | 原有方案 |
-| IDE 2.6.0 远程 Agent（`~/.gemini/bin/agy --hub`） | [`antiagy.sh`](./antiagy.sh) | 实验性，待真实使用反馈 |
+| IDE 2.6.0 远程 Agent（`~/.gemini/bin/agy --hub`） | [`antiagy.sh`](./antiagy.sh) | 实验性；Ubuntu WSL2 已验证 |
 
 两个脚本都通过 graftcp wrapper 代理出站流量。`antiagy.sh` 处理的是 Linux/WSL 中没有 `.exe` 后缀的 `agy`，与 Windows 的 `agy.exe` 不同；在有真实使用反馈前，保留 `antissh.sh` 原有入口和用途。
 
@@ -22,7 +22,7 @@
 
 ## 实验性：IDE 2.6.0 的 Linux/WSL `agy --hub`
 
-`antiagy.sh` 专门检查并代理 IDE 管理的 `~/.gemini/bin/agy`，不会修改 CLI 的 `~/.local/bin/agy`，也不会改动 `antissh.sh`。这是待真实使用反馈验证的方案，先使用 `check` 检查目标文件和代理连通性，再执行 `install`。
+`antiagy.sh` 专门检查并代理 IDE 管理的 `~/.gemini/bin/agy`，不会修改 CLI 的 `~/.local/bin/agy`，也不会改动 `antissh.sh`。除本机 WSL2 测试外仍待更多真实环境反馈；先使用 `check` 检查目标文件和代理连通性，再执行 `install`。
 
 前提：Linux/WSL 中已通过 IDE 启动过 Agent，使 `~/.gemini/bin/agy` 存在；安装 `curl` 和 graftcp v0.8+。若尚未编译 graftcp，可运行：
 
@@ -30,6 +30,8 @@
 git clone https://github.com/hmgle/graftcp.git ~/.graftcp-antigravity/graftcp
 make -C ~/.graftcp-antigravity/graftcp
 ```
+
+如果 IDE 在首次安装 Backend 时提示 `Invalid URL protocol`，检查 Linux/WSL 的 `http_proxy`、`https_proxy` 等环境变量是否使用 `socks5h://`。本机测试时，这些变量使 IDE 下载器无法获取 release manifest；应先让 IDE 的启动环境使用 HTTP 代理或不带这些变量，完成官方 Backend 安装，再运行 `antiagy.sh`。脚本不会替 IDE 修复下载器。
 
 在 Linux/WSL 中下载本仓库根目录的脚本并执行：
 
@@ -45,7 +47,7 @@ HTTP 代理可写为 `http://127.0.0.1:8080`；代理地址需能从 **Linux/WSL
 
 脚本会在修改前检查原始文件为可执行的 Linux ELF、读取版本、测试通过代理访问 Google 认证端点，并在安装后复核版本；原始二进制保存在 `~/.gemini/bin/agy.antiagy-original`。需要恢复时，关闭 IDE 远程窗口并执行 `bash antiagy.sh restore`。IDE 更新若覆盖 wrapper，`status` 会显示 `updated`，重新执行 `install` 即可保留旧备份并代理新版本。脚本不会停止运行中的 `agy --hub`。
 
-此方案尚未在真实远程 IDE 会话中验证；如果 `check` 或安装后的 Agent 启动失败，请带上 IDE 版本、Linux/WSL 类型、`antiagy.sh status` 输出和脱敏后的 Antigravity 日志反馈。不要在日志中公开 `--csrf_token` 等令牌。
+已在 Ubuntu WSL2 + IDE 2.6.0 会话中验证：Hub 启动、Google 登录和一次模型回复均成功。SSH 远端和其他 Linux 发行版仍待反馈；如果 `check` 或安装后的 Agent 启动失败，请带上 IDE 版本、Linux/WSL 类型、`antiagy.sh status` 输出和脱敏后的 Antigravity 日志反馈。不要在日志中公开 `--csrf_token` 等令牌。
 
 ## Linux 使用方法（antissh.sh）
 

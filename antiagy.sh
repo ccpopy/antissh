@@ -79,7 +79,10 @@ target_state() {
 }
 
 hub_running() {
-  ps -u "$(id -u)" -o comm=,args= | awk '$1 == "agy" && /--hub([ =]|$)/ { found=1 } END { exit !found }'
+  # After installation, Linux reports the backup's name (truncated to 15 bytes)
+  # as the process name, rather than "agy".
+  ps -ww -u "$(id -u)" -o comm=,args= | awk \
+    '($1 == "agy" || $1 ~ /^agy\.antiagy-/) && /(^|[[:space:]])--hub([[:space:]=]|$)/ { found=1 } END { exit !found }'
 }
 
 parse_proxy() {
